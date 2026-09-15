@@ -15,7 +15,8 @@ from typing import Any
 
 from sqlalchemy import Boolean, Date, Integer, Numeric
 
-from .models import Ata, Base, Contrato
+from .detail_rules import is_target_file_type
+from .models import Arquivo, Ata, Base, Contrato, Item, ItemResultado
 
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
@@ -138,3 +139,39 @@ def normalize_ata(raw: dict[str, Any]) -> dict[str, Any]:
 
 def normalize_contrato(raw: dict[str, Any]) -> dict[str, Any]:
     return normalize(raw, Contrato)
+
+
+# --- fase 2 (detalhamento) ------------------------------------------------------
+# A chave da compra / do documento nao vem no payload de detalhe (ou vem com
+# nome enganoso, ver docs/API_DETALHE.md); e injetada por quem chamou.
+
+
+def normalize_item(raw: dict[str, Any], compra_key: str) -> dict[str, Any]:
+    record = normalize(raw, Item)
+    record["compra_key"] = compra_key
+    return record
+
+
+def normalize_resultado(
+    raw: dict[str, Any], compra_key: str, numero_item: int, posicao: int
+) -> dict[str, Any]:
+    """`posicao` (0-based) so entra se sequencialResultado faltar no payload."""
+    record = normalize(raw, ItemResultado)
+    record["compra_key"] = compra_key
+    record["numero_item"] = numero_item
+    if record.get("sequencial_resultado") is None:
+        record["sequencial_resultado"] = posicao + 1
+    return record
+
+
+def normalize_arquivo(
+    raw: dict[str, Any],
+    documento_tipo: str,
+    documento_id: str,
+    targets: frozenset[str],
+) -> dict[str, Any]:
+    record = normalize(raw, Arquivo)
+    record["documento_tipo"] = documento_tipo
+    record["documento_id"] = documento_id
+    record["is_target_type"] = is_target_file_type(record.get("tipo_documento_nome"), targets)
+    return record
