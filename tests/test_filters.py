@@ -1,7 +1,13 @@
 from datetime import date
 
 from pncp_collector.config import Settings
-from pncp_collector.filters import DiscardReason, SuspicionReason, check_record
+from pncp_collector.filters import (
+    ATA_FIELDS,
+    CONTRATO_FIELDS,
+    DiscardReason,
+    SuspicionReason,
+    check_record,
+)
 from pncp_collector.pipeline import Collector, date_range
 from pncp_collector.schemas import normalize_ata, normalize_contrato
 
@@ -25,43 +31,43 @@ def base_ata(**overrides):
 
 
 def test_mantem_assinatura_recente():
-    discard, reasons = check_record(base_ata(), CONFIG, TODAY)
+    discard, reasons = check_record(base_ata(), ATA_FIELDS, CONFIG, TODAY)
     assert discard is None
     assert reasons == []
 
 
 def test_descarta_assinatura_antiga_mesmo_vigente():
     record = base_ata(dataAssinatura="2023-06-16", vigenciaFim="2030-10-07")
-    discard, _ = check_record(record, CONFIG, TODAY)
+    discard, _ = check_record(record, ATA_FIELDS, CONFIG, TODAY)
     assert discard == DiscardReason.OLD_SIGNATURE
 
 
 def test_descarta_sem_data_assinatura():
-    discard, _ = check_record(base_ata(dataAssinatura=None), CONFIG, TODAY)
+    discard, _ = check_record(base_ata(dataAssinatura=None), ATA_FIELDS, CONFIG, TODAY)
     assert discard == DiscardReason.NO_SIGNATURE
 
 
 def test_descarta_cancelado():
     record = base_ata(cancelado=True, dataCancelamento="2026-07-01")
-    assert check_record(record, CONFIG, TODAY)[0] == DiscardReason.CANCELLED
+    assert check_record(record, ATA_FIELDS, CONFIG, TODAY)[0] == DiscardReason.CANCELLED
 
 
 def test_limite_exato_de_365_dias():
     record = base_ata(dataAssinatura="2025-09-08")
-    assert check_record(record, CONFIG, TODAY)[0] is None
+    assert check_record(record, ATA_FIELDS, CONFIG, TODAY)[0] is None
     record = base_ata(dataAssinatura="2025-09-07")
-    assert check_record(record, CONFIG, TODAY)[0] == DiscardReason.OLD_SIGNATURE
+    assert check_record(record, ATA_FIELDS, CONFIG, TODAY)[0] == DiscardReason.OLD_SIGNATURE
 
 
 def test_suspeito_vigencia_longa_e_inicio_antes_da_assinatura():
     record = base_ata(vigenciaInicio="2026-05-01", vigenciaFim="2054-10-23")
-    discard, reasons = check_record(record, CONFIG, TODAY)
+    discard, reasons = check_record(record, ATA_FIELDS, CONFIG, TODAY)
     assert discard is None
     assert SuspicionReason.LONG_VALIDITY in reasons
     assert SuspicionReason.VALIDITY_BEFORE_SIGNATURE in reasons
 
 
-def test_normaliza_contrato_com_estruturas_aninhadas():
+def test_normaliza_contrato_achatando_objetos_aninhados():
     record = normalize_contrato(
         {
             "numeroControlePNCP": "9-2-3/2026",
@@ -75,10 +81,13 @@ def test_normaliza_contrato_com_estruturas_aninhadas():
             "tipoContrato": {"id": 1, "nome": "Contrato"},
         }
     )
-    assert record["agency_cnpj"] == "00394452000103"
-    assert str(record["global_value"]) == "1234.56"
-    assert record["unit_uf"] == "RS"
-    assert check_record(record, CONFIG, TODAY)[0] is None
+    # O valor vai como veio; a unica transformacao e no nome da coluna.
+    assert record["orgao_entidade_cnpj"] == "00.394.452/0001-03"
+    assert record["orgao_entidade_razao_social"] == "ORGAO"
+    assert str(record["valor_global"]) == "1234.56"
+    assert record["unidade_orgao_uf_sigla"] == "RS"
+    assert record["tipo_contrato_nome"] == "Contrato"
+    assert check_record(record, CONTRATO_FIELDS, CONFIG, TODAY)[0] is None
 
 
 def test_janelas_de_varredura():

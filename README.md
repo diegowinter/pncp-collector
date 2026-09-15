@@ -67,8 +67,26 @@ defasagem entre assinatura e publicação — daí a janela de 400 dias.
 
 ## Banco
 
-- `atas` e `contratos`: colunas normalizadas + `raw` (JSONB com o payload original),
-  chave primária `pncp_id`, gravação por *upsert* — reexecutar é idempotente.
+**Convenção de nomes:** as colunas que vêm do PNCP mantêm o nome da API, apenas
+convertido de camelCase para snake_case — `dataAssinatura` → `data_assinatura`,
+`numeroControlePNCPAta` → `numero_controle_pncp_ata`. Objetos aninhados são achatados
+carregando o caminho no nome: `orgaoEntidade.razaoSocial` → `orgao_entidade_razao_social`.
+Os valores vão como vieram; a única transformação é no nome. Só os campos de controle
+nossos ficam em inglês: `collected_at`, `updated_at`, `raw`, `suspicious`,
+`suspicious_reasons`, `derived_from_ata`, `derivation_match` e a tabela
+`collection_runs` inteira.
+
+Como os nomes diferem entre os dois datasets (a ata tem `vigencia_inicio`, o contrato tem
+`data_vigencia_inicio`), os filtros locais leem os campos por um mapa declarado em
+`filters.DatasetFields`.
+
+- `atas` e `contratos`: colunas espelhando a API + `raw` (JSONB com o payload íntegro),
+  chave primária `numero_controle_pncp_ata` e `numero_controle_pncp` respectivamente,
+  gravação por *upsert* — reexecutar é idempotente.
+- Contratos não têm `cancelado`/`data_cancelamento`: a API não devolve esses campos para
+  contratos, então o filtro de cancelamento vale só para atas.
+- O que não virou coluna continua acessível em `raw` (ex.: `frutoAdesao`,
+  `identificadorCipi`, dados de subcontratação).
 - `collection_runs`: janela e estatísticas de cada execução (recebidos, duplicados,
   persistidos, suspeitos, descartes por motivo).
 

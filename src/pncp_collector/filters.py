@@ -23,6 +23,40 @@ class SuspicionReason:
     VALIDITY_BEFORE_SIGNATURE = "vigencia_inicia_antes_da_assinatura"
 
 
+@dataclass(frozen=True)
+class DatasetFields:
+    """De que campo do PNCP cada regra le, em cada dataset.
+
+    Os nomes diferem entre atas e contratos porque seguimos a nomenclatura da
+    API: a ata tem `vigencia_inicio`, o contrato tem `data_vigencia_inicio`.
+    """
+
+    identifier: str
+    signature: str
+    validity_start: str
+    validity_end: str
+    cancelled: str | None = None
+    cancelled_at: str | None = None
+
+
+ATA_FIELDS = DatasetFields(
+    identifier="numero_controle_pncp_ata",
+    signature="data_assinatura",
+    validity_start="vigencia_inicio",
+    validity_end="vigencia_fim",
+    cancelled="cancelado",
+    cancelled_at="data_cancelamento",
+)
+
+# A API nao devolve cancelamento para contratos, entao nao ha o que checar.
+CONTRATO_FIELDS = DatasetFields(
+    identifier="numero_controle_pncp",
+    signature="data_assinatura",
+    validity_start="data_vigencia_inicio",
+    validity_end="data_vigencia_fim",
+)
+
+
 @dataclass
 class FilterStats:
     """Contadores da execucao, exibidos ao final."""
@@ -52,27 +86,33 @@ class FilterStats:
 
 
 def check_record(
-    record: dict[str, Any], config: Settings, today: date | None = None
+    record: dict[str, Any],
+    fields: DatasetFields,
+    config: Settings,
+    today: date | None = None,
 ) -> tuple[str | None, list[str]]:
     """Retorna (motivo_do_descarte | None, motivos_de_suspeita)."""
     today = today or date.today()
 
-    if not record.get("pncp_id"):
+    if not record.get(fields.identifier):
         return DiscardReason.NO_ID, []
 
     # Corte que define a amostra: assinatura nos ultimos N dias.
     # Sem data de assinatura nao ha como atestar a atualidade do preco.
-    signed_at = record.get("signed_at")
+    signed_at = record.get(fields.signature)
     if signed_at is None:
         return DiscardReason.NO_SIGNATURE, []
     if signed_at < today - timedelta(days=config.signature_max_age_days):
         return DiscardReason.OLD_SIGNATURE, []
 
-    if record.get("cancelled") or record.get("cancelled_at") is not None:
+    cancelled = fields.cancelled and record.get(fields.cancelled)
+    cancelled_at = fields.cancelled_at and record.get(fields.cancelled_at)
+    if cancelled or cancelled_at is not None:
         return DiscardReason.CANCELLED, []
 
     reasons: list[str] = []
-    start, end = record.get("validity_start"), record.get("validity_end")
+    start = record.get(fields.validity_start)
+    end = record.get(fields.validity_end)
     if start and end and (end - start).days > config.suspicious_validity_days:
         reasons.append(SuspicionReason.LONG_VALIDITY)
     if start and start < signed_at:

@@ -29,7 +29,14 @@ from .db import (
     load_ata_keys,
     upsert,
 )
-from .filters import DiscardReason, FilterStats, check_record
+from .filters import (
+    ATA_FIELDS,
+    CONTRATO_FIELDS,
+    DatasetFields,
+    DiscardReason,
+    FilterStats,
+    check_record,
+)
 from .models import Ata, CollectionRun, Contrato
 from .schemas import normalize_ata, normalize_contrato
 
@@ -103,6 +110,7 @@ class Collector:
             fetch=fetch,
             normalize=normalize_ata,
             model=Ata,
+            fields=ATA_FIELDS,
             # Dedup obrigatorio: a mesma ata volta em todo dia que a vigencia cobre.
             seen=set(),
         )
@@ -123,6 +131,7 @@ class Collector:
             fetch=fetch,
             normalize=normalize_contrato,
             model=Contrato,
+            fields=CONTRATO_FIELDS,
             # Sem dedup entre dias: cada contrato aparece so no dia da publicacao.
             # O set ainda protege contra repeticao dentro da mesma execucao.
             seen=set(),
@@ -140,10 +149,10 @@ class Collector:
         compra de uma ata da base.
         """
         ata_ids, compra_ids = ata_keys
-        ata_ref = record.get("ata_pncp_id")
+        ata_ref = record.get("numero_controle_pncp_ata")
         if ata_ref and ata_ref in ata_ids:
             return "ata"
-        compra = record.get("compra_pncp_id")
+        compra = record.get("numero_controle_pncp_compra")
         if compra and compra in compra_ids:
             return "compra"
         return None
@@ -153,6 +162,7 @@ class Collector:
         raw: dict[str, Any],
         normalize: Callable[[dict[str, Any]], dict[str, Any]],
         model: type[Ata] | type[Contrato],
+        fields: DatasetFields,
         today: date,
         seen: set[str],
         ata_keys: tuple[set[str], set[str]] | None,
@@ -164,14 +174,14 @@ class Collector:
         stats.fetched += 1
         record = normalize(raw)
 
-        pncp_id = record.get("pncp_id")
-        if pncp_id and pncp_id in seen:
+        identifier = record.get(fields.identifier)
+        if identifier and identifier in seen:
             stats.duplicates += 1
             return
-        if pncp_id:
-            seen.add(pncp_id)
+        if identifier:
+            seen.add(identifier)
 
-        discard, suspicious_reasons = check_record(record, self.config, today)
+        discard, suspicious_reasons = check_record(record, fields, self.config, today)
 
         if discard is None and ata_keys is not None:
             match = self._derivation_match(record, ata_keys)
@@ -210,6 +220,7 @@ class Collector:
         fetch: Callable[[PNCPClient, date], Iterator[dict[str, Any]]],
         normalize: Callable[[dict[str, Any]], dict[str, Any]],
         model: type[Ata] | type[Contrato],
+        fields: DatasetFields,
         seen: set[str],
         ata_keys: tuple[set[str], set[str]] | None = None,
     ) -> FilterStats:
@@ -242,6 +253,7 @@ class Collector:
                             raw=raw,
                             normalize=normalize,
                             model=model,
+                            fields=fields,
                             today=today,
                             seen=seen,
                             ata_keys=ata_keys,

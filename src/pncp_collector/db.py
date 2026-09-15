@@ -35,15 +35,18 @@ def upsert(session: Session, model: type[Ata] | type[Contrato], rows: Sequence[d
     if not rows:
         return 0
 
+    primary_key = [column.name for column in model.__table__.primary_key.columns]
+    preserved = set(primary_key) | {"collected_at", "updated_at"}
+
     statement = insert(model).values(list(rows))
     updatable = {
         column.name: statement.excluded[column.name]
         for column in model.__table__.columns
-        if column.name not in ("pncp_id", "collected_at", "updated_at")
+        if column.name not in preserved
     }
     updatable["updated_at"] = func.now()
     statement = statement.on_conflict_do_update(
-        index_elements=[model.pncp_id], set_=updatable
+        index_elements=primary_key, set_=updatable
     )
     session.execute(statement)
     return len(rows)
@@ -55,11 +58,13 @@ def load_ata_keys(session: Session) -> tuple[set[str], set[str]]:
     Servem para descartar o contrato derivado de uma ata ja coletada: o preco
     daquele item ja esta registrado pela ata.
     """
-    ata_ids = {row[0] for row in session.execute(select(Ata.pncp_id))}
+    ata_ids = {row[0] for row in session.execute(select(Ata.numero_controle_pncp_ata))}
     compra_ids = {
         row[0]
         for row in session.execute(
-            select(Ata.compra_pncp_id).where(Ata.compra_pncp_id.is_not(None))
+            select(Ata.numero_controle_pncp_compra).where(
+                Ata.numero_controle_pncp_compra.is_not(None)
+            )
         )
     }
     return ata_ids, compra_ids

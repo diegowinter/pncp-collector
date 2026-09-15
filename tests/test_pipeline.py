@@ -5,7 +5,7 @@ from datetime import date
 import pytest
 
 from pncp_collector.config import Settings
-from pncp_collector.filters import DiscardReason
+from pncp_collector.filters import ATA_FIELDS, CONTRATO_FIELDS, DiscardReason
 from pncp_collector.models import Ata, Contrato
 from pncp_collector.pipeline import Collector
 
@@ -78,6 +78,7 @@ def run_dataset(collector, monkeypatch, dataset, pages, ata_keys=None):
         pipeline.normalize_ata if dataset == "atas" else pipeline.normalize_contrato
     )
     model = Ata if dataset == "atas" else Contrato
+    fields = ATA_FIELDS if dataset == "atas" else CONTRATO_FIELDS
     days = sorted(pages)
     return collector._run(
         dataset=dataset,
@@ -86,6 +87,7 @@ def run_dataset(collector, monkeypatch, dataset, pages, ata_keys=None):
         fetch=fetch,
         normalize=normalize,
         model=model,
+        fields=fields,
         seen=set(),
         ata_keys=ata_keys,
     )
@@ -112,7 +114,8 @@ def test_dedup_de_atas_entre_dias(collector, monkeypatch):
     assert stats.fetched == 4
     assert stats.duplicates == 1
     assert stats.kept == 3
-    assert {row["pncp_id"] for row in collector.store["atas"]} == {"A-1", "A-2", "A-3"}
+    stored = {row["numero_controle_pncp_ata"] for row in collector.store["atas"]}
+    assert stored == {"A-1", "A-2", "A-3"}
 
 
 def test_atas_antigas_sao_descartadas(collector, monkeypatch):
@@ -158,7 +161,7 @@ def test_derivado_de_ata_por_padrao_e_mantido_e_marcado(collector, monkeypatch):
     assert stats.kept == 3
     assert stats.discarded[DiscardReason.DERIVED_FROM_ATA] == 0
 
-    rows = {row["pncp_id"]: row for row in collector.store["contratos"]}
+    rows = {row["numero_controle_pncp"]: row for row in collector.store["contratos"]}
     assert rows["K-1"]["derived_from_ata"] and rows["K-1"]["derivation_match"] == "ata"
     assert rows["K-2"]["derived_from_ata"] and rows["K-2"]["derivation_match"] == "compra"
     assert rows["K-3"]["derived_from_ata"] is False
@@ -175,7 +178,8 @@ def test_derivado_de_ata_e_descartado_quando_configurado(collector, monkeypatch)
 
     assert stats.derived_from_ata == 2
     assert stats.discarded[DiscardReason.DERIVED_FROM_ATA] == 2
-    assert [row["pncp_id"] for row in collector.store["contratos"]] == ["K-3"]
+    kept = [row["numero_controle_pncp"] for row in collector.store["contratos"]]
+    assert kept == ["K-3"]
 
 
 def test_marca_suspeitos_sem_descartar(collector, monkeypatch):
@@ -224,6 +228,7 @@ def test_dia_com_falha_nao_derruba_a_varredura(collector, monkeypatch):
         fetch=fetch,
         normalize=pipeline.normalize_ata,
         model=Ata,
+        fields=ATA_FIELDS,
         seen=set(),
     )
 
