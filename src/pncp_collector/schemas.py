@@ -117,6 +117,17 @@ CONTROL_COLUMNS = frozenset(
         "suspicious_reasons",
         "derived_from_ata",
         "derivation_match",
+        # fase 2 (detalhamento)
+        "detail_status",
+        "detail_error",
+        "detailed_at",
+        "detail_attempts",
+        "compra_key",
+        "compra_resolved_by",
+        "is_target_type",
+        "is_winner",
+        "documento_tipo",
+        "documento_id",
     }
 )
 
