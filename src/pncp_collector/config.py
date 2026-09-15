@@ -43,6 +43,19 @@ class Settings(BaseSettings):
     detail_request_delay: float | None = None  # None = request_delay
     detail_page_size: int = Field(default=500, ge=10, le=500)  # /itens
 
+    # Tipos de arquivo (tipoDocumentoNome) que contam como "arquivo alvo",
+    # separados por virgula; vazio = qualquer arquivo conta. Os defaults vem
+    # da medicao em docs/API_DETALHE.md, § 1.2: as atas do orgao amostrado
+    # sao 100% "Outros Documentos", e contrato-por-empenho so tem a nota.
+    target_file_types_ata: str = ""
+    target_file_types_contrato: str = "Contrato,Nota de Empenho"
+
+    # Documento/compra em erro deixa de ser revisitado apos N tentativas.
+    detail_max_attempts: int = 5
+
+    # Threads nas chamadas de detalhe (a latencia e do servidor, nao throttling).
+    detail_concurrency: int = Field(default=1, ge=1, le=8)
+
     @property
     def effective_detail_delay(self) -> float:
         if self.detail_request_delay is None:
