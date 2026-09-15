@@ -1,4 +1,4 @@
-"""Cliente HTTP da API de consulta do PNCP."""
+"""Cliente HTTP das APIs de consulta e de detalhe do PNCP."""
 
 from __future__ import annotations
 
@@ -12,6 +12,16 @@ from typing import Any
 import httpx
 
 from .config import Settings, settings as default_settings
+from .ids import (
+    AtaRef,
+    CompraRef,
+    ContratoRef,
+    url_arquivos_ata,
+    url_arquivos_contrato,
+    url_contrato_detalhe,
+    url_itens,
+    url_resultados,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +29,40 @@ ATAS_PATH = "/api/consulta/v1/atas"
 CONTRATOS_PATH = "/api/consulta/v1/contratos"
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+NOT_FOUND_STATUS = {404, 410}
 
 
 class DayFetchError(RuntimeError):
     """Um dia nao pode ser lido apos esgotar as tentativas."""
 
 
+class DetailFetchError(RuntimeError):
+    """Uma chamada de detalhe falhou: 4xx terminal ou retries esgotados."""
+
+    def __init__(self, path: str, status_code: int | None, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.status_code = status_code
+
+
+class DetailNotFound(DetailFetchError):
+    """404/410: o recurso nao existe (ou foi removido) no PNCP."""
+
+
+class _RetriesExhausted(Exception):
+    """Interno: _request esgotou as tentativas. Carrega o ultimo status visto."""
+
+    def __init__(self, status_code: int | None) -> None:
+        super().__init__(status_code)
+        self.status_code = status_code
+
+
 class PNCPClient:
-    """Acesso paginado aos endpoints de consulta. Sem autenticacao."""
+    """Acesso aos endpoints de consulta (paginados por dia) e de detalhe. Sem autenticacao.
+
+    Thread-safe: `httpx.Client` pode ser compartilhado; o delay entre chamadas e
+    por thread, entao com N threads o ritmo efetivo e N/delay.
+    """
 
     def __init__(self, config: Settings | None = None) -> None:
         self.config = config or default_settings
@@ -45,36 +81,55 @@ class PNCPClient:
     def close(self) -> None:
         self._client.close()
 
-    def _get(self, path: str, params: dict[str, Any]) -> httpx.Response | None:
-        """Uma requisicao com retry/backoff. Retorna None em 204 (dia vazio)."""
+    # --- transporte ----------------------------------------------------------
+
+    def _request(self, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        """Uma requisicao com retry/backoff em 429/5xx/transporte.
+
+        Devolve a resposta para qualquer status nao-retentavel (200, 204, 4xx...):
+        quem chama decide o que cada um significa. Esgotou: _RetriesExhausted.
+        """
+        last_status: int | None = None
         for attempt in range(self.config.max_retries):
             try:
                 response = self._client.get(path, params=params)
             except httpx.TransportError as exc:
+                last_status = None
                 self._sleep_backoff(attempt, f"erro de transporte: {exc}")
                 continue
 
-            if response.status_code == 204:
-                return None
-            if response.status_code == 200:
-                return response
             if response.status_code in RETRYABLE_STATUS:
+                last_status = response.status_code
                 retry_after = response.headers.get("Retry-After")
                 delay = float(retry_after) if retry_after and retry_after.isdigit() else None
                 self._sleep_backoff(attempt, f"HTTP {response.status_code}", delay)
                 continue
 
-            response.raise_for_status()
+            return response
 
-        raise DayFetchError(
-            f"Falha em {path} com {params} apos {self.config.max_retries} tentativas."
-        )
+        raise _RetriesExhausted(last_status)
 
     def _sleep_backoff(self, attempt: int, reason: str, delay: float | None = None) -> None:
         wait = delay if delay is not None else (2**attempt) + random.random()
         wait = min(wait, self.config.max_backoff)
         logger.warning("Retry %d (%s); aguardando %.1fs", attempt + 1, reason, wait)
         time.sleep(wait)
+
+    # --- consulta (fase 1) ---------------------------------------------------
+
+    def _get(self, path: str, params: dict[str, Any]) -> httpx.Response | None:
+        """Consulta por dia. Retorna None em 204 (dia vazio); 4xx levanta HTTPStatusError."""
+        try:
+            response = self._request(path, params)
+        except _RetriesExhausted as exc:
+            raise DayFetchError(
+                f"Falha em {path} com {params} apos {self.config.max_retries} tentativas."
+            ) from exc
+
+        if response.status_code == 204:
+            return None
+        response.raise_for_status()
+        return response
 
     def _iter_day(self, path: str, day: date, extra: dict[str, Any]) -> Iterator[dict[str, Any]]:
         """Percorre todas as paginas de um unico dia (dataInicial == dataFinal)."""
@@ -128,3 +183,77 @@ class PNCPClient:
                 "codigoUnidadeAdministrativa": self.config.codigo_unidade_administrativa,
             },
         )
+
+    # --- detalhe (fase 2) ----------------------------------------------------
+
+    def _get_detail(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """Uma chamada de detalhe. 200 -> JSON; 204 -> None; 404/410 -> DetailNotFound;
+        outro 4xx -> DetailFetchError sem retry; retries esgotados -> DetailFetchError."""
+        try:
+            response = self._request(path, params)
+        except _RetriesExhausted as exc:
+            raise DetailFetchError(
+                path,
+                exc.status_code,
+                f"{path}: esgotou {self.config.max_retries} tentativas "
+                f"(ultimo status {exc.status_code}).",
+            ) from exc
+        finally:
+            time.sleep(self.config.effective_detail_delay)
+
+        if response.status_code == 204:
+            return None
+        if response.status_code in NOT_FOUND_STATUS:
+            raise DetailNotFound(path, response.status_code, f"{path}: HTTP {response.status_code}")
+        if response.status_code != 200:
+            raise DetailFetchError(
+                path, response.status_code, f"{path}: HTTP {response.status_code}"
+            )
+        return response.json()
+
+    @staticmethod
+    def _as_list(payload: Any) -> list[dict[str, Any]]:
+        """204 e [] sao equivalentes; objeto unico vira lista de um."""
+        if payload is None:
+            return []
+        if isinstance(payload, dict):
+            return [payload]
+        return list(payload)
+
+    def get_arquivos_ata(self, ref: AtaRef) -> list[dict[str, Any]]:
+        """Lista de arquivos da ata. 404 propaga (ata removida)."""
+        return self._as_list(self._get_detail(url_arquivos_ata(ref)))
+
+    def get_arquivos_contrato(self, ref: ContratoRef) -> list[dict[str, Any]]:
+        """Lista de arquivos do contrato. 404 propaga (contrato removido)."""
+        return self._as_list(self._get_detail(url_arquivos_contrato(ref)))
+
+    def get_itens(self, ref: CompraRef) -> list[dict[str, Any]]:
+        """Todos os itens da compra. O endpoint pagina (default 10!) e termina em []."""
+        path = url_itens(ref)
+        items: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            chunk = self._as_list(
+                self._get_detail(
+                    path, {"pagina": page, "tamanhoPagina": self.config.detail_page_size}
+                )
+            )
+            items.extend(chunk)
+            if len(chunk) < self.config.detail_page_size:
+                return items
+            page += 1
+
+    def get_resultados(self, ref: CompraRef, numero_item: int) -> list[dict[str, Any]]:
+        """Resultados do item. Item sem resultado (204 ou 404) e [] — nao e erro."""
+        try:
+            return self._as_list(self._get_detail(url_resultados(ref, numero_item)))
+        except DetailNotFound:
+            return []
+
+    def get_contrato(self, ref: ContratoRef) -> dict[str, Any]:
+        """Capa do contrato pela API de detalhe (fallback para compra_key)."""
+        payload = self._get_detail(url_contrato_detalhe(ref))
+        if not isinstance(payload, dict):
+            raise DetailNotFound(url_contrato_detalhe(ref), None, "contrato sem corpo")
+        return payload

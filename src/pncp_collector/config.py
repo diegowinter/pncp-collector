@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     max_retries: int = 8
     max_backoff: float = 60.0
 
+    # Fase 2 (detalhamento). A API de detalhe e lenta (~8 s por chamada) mas
+    # nao limita taxa como a de consulta; ver docs/API_DETALHE.md, § 1.6.
+    detail_request_delay: float | None = None  # None = request_delay
+    detail_page_size: int = Field(default=500, ge=10, le=500)  # /itens
+
+    @property
+    def effective_detail_delay(self) -> float:
+        if self.detail_request_delay is None:
+            return self.request_delay
+        return self.detail_request_delay
+
     # Recortes opcionais da consulta.
     cnpj: str | None = None
     codigo_unidade_administrativa: str | None = None
