@@ -170,6 +170,7 @@ class DetailStats:
     documents_before: Counter = field(default_factory=Counter)
     documents_after: Counter = field(default_factory=Counter)
     documents_processed: int = 0
+    documents_closed: int = 0
     compras_fetched: int = 0
     items_stored: int = 0
     results_stored: int = 0
@@ -183,6 +184,7 @@ class DetailStats:
             "documents_before": dict(self.documents_before),
             "documents_after": dict(self.documents_after),
             "documents_processed": self.documents_processed,
+            "documents_closed": self.documents_closed,
             "compras_fetched": self.compras_fetched,
             "items_stored": self.items_stored,
             "results_stored": self.results_stored,
