@@ -352,3 +352,51 @@ comercial e se a concorrência provoca 429 (atividade 10.3).
   "unidadeOrgaoParteEnvolvida": null
 }
 ```
+
+---
+
+## 10.3 Validação com dados reais (2026-09-15, tarde)
+
+`detalhar --limit 40` com `PNCP_DETAIL_CONCURRENCY=4`, seguido de `--only-step B` para as
+compras restantes e `--only-step CD`:
+
+| Passo | Chamadas | Duração | Efetivo por chamada (4 threads) |
+|---|---|---|---|
+| A (40 atas + 40 contratos) | 80 | 98 s | 4,9 s |
+| B (40 compras) | 40 | 47 s | 4,7 s |
+| C (38 compras, 222 itens) | 222 | 283 s | 5,1 s |
+| D | 0 | 0,1 s | — |
+| B (34 compras) | 34 | ~45 s | — |
+| C (22 compras, 216 itens) | 216 | 246 s | 4,6 s |
+
+- **0 erros, 0 × 429** em 592 chamadas com 4 threads. A latência à tarde ficou em ~5 s por
+  chamada (de manhã, sequencial, era 8–9 s). Subir para 8 threads é o próximo teste.
+- Estimativa revisada para a base inteira (~6.450 chamadas): **~2,2 h com 4 threads**,
+  ~1,1 h com 8 se a API aguentar.
+
+Distribuição final (80 documentos passaram pelo passo A):
+
+| Status | Atas | Contratos |
+|---|---|---|
+| `ok` | 38 | 33 |
+| `sem_homologado` | 2 | 7 |
+| `sem_arquivo` / `sem_identificacao` / `erro` | 0 | 0 |
+
+- Os 9 `sem_homologado` são compras cujos itens estão todos `Em andamento` — o motivo se sustenta.
+- 74 compras, 696 itens, 438 resultados; todo item `Homologado` com `temResultado` de compra
+  `results_status = ok` tem exatamente um resultado e um vencedor. Nenhum item com mais de um
+  resultado nesta amostra.
+- Totais de itens batem com `/itens/quantidade` medido na § 1.3 (25970 → 4, 26123 → 14,
+  003102/2023 → 21): a paginação com `tamanhoPagina=500` traz tudo.
+- Situações de item vistas agora: `Homologado`, `Fracassado`, `Deserto`, `Em andamento`
+  (grafia com "a" minúsculo). 4 itens `Fracassado` vieram com `temResultado = true` — não
+  são consultados (só `Homologado` conta).
+- Arquivos: 138 de ata (100 % `Outros Documentos`), 54 de contrato (`Nota de Empenho` 37,
+  `Outros Documentos` 14, `Contrato` 3). Nenhum documento caiu em `sem_arquivo`.
+- **Interrupção**: passo C morto (`kill`) após 75 s, com 52 compras `ok` e 22 `pendente`
+  (280 resultados gravados, 216 a buscar). A reexecução fez **exatamente 216 chamadas** e
+  fechou 37 documentos. O commit por compra funciona como desenhado.
+- Conferência manual contra a página pública (`compras.url_pncp`) **não foi feita** nesta
+  rodada; o que foi conferido é a coerência interna (contagens, chaves, vencedor único) e a
+  amostra de `07954480000179-1-025970/2025`, cujo item 1 (dieta enteral, 4.638.000 mL,
+  estimado 0,0951, homologado 0,0545 para FRESENIUS KABI) bate com a sondagem da § 1.4.
