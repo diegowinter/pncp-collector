@@ -33,10 +33,19 @@ class Settings(BaseSettings):
 
     # A API rejeita tamanhoPagina fora de [10, 500].
     page_size: int = Field(default=100, ge=10, le=500)
+    # Intervalo mínimo entre o início de duas requisições de consulta. Com
+    # concorrência > 1 ele é o teto global (compartilhado entre as threads),
+    # não um delay por thread.
     request_delay: float = 0.5  # segundos entre requisições
     timeout: float = 60.0
     max_retries: int = 8
     max_backoff: float = 60.0
+
+    # Dias buscados em paralelo na fase 1. A API de consulta e rapida mas
+    # devolve 429 com frequencia (docs/API_DETALHE.md, § 1.6), entao aqui a
+    # concorrencia serve para esconder latencia, nao para multiplicar o ritmo:
+    # `request_delay` continua limitando a taxa global.
+    list_concurrency: int = Field(default=1, ge=1, le=16)
 
     # Fase 2 (detalhamento). A API de detalhe e lenta (~8 s por chamada) mas
     # nao limita taxa como a de consulta; ver docs/API_DETALHE.md, § 1.6.

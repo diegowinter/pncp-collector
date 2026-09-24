@@ -59,6 +59,16 @@ Uma chamada por dia, com `dataInicial == dataFinal`, paginando de 100 em 100.
   (`PNCP_REQUEST_DELAY`, `PNCP_MAX_RETRIES`, `PNCP_MAX_BACKOFF`). A API limita taxa com
   frequência: um dia de contratos (83 páginas) leva alguns minutos. Um dia que esgota as
   tentativas é registrado em `failed_days` e a varredura continua.
+- O progresso tem duas barras: **dias** (total fixo, a janela) e **páginas** (total parcial —
+  quantas páginas um dia tem só se sabe ao ler a primeira, via `totalPaginas`, então o total
+  cresce conforme os dias começam). A segunda existe porque um único dia pode ter dezenas de
+  páginas, e sem ela a barra de dias parece travada.
+- `PNCP_LIST_CONCURRENCY` (1–16, padrão 1) busca vários **dias** em paralelo. O ganho é
+  esconder a latência, não acelerar o ritmo: `REQUEST_DELAY` passa a valer como intervalo
+  mínimo entre chamadas somando todas as threads, e um 429 freia o grupo inteiro pelo
+  `Retry-After` — sem isso, N threads só multiplicariam os 429. Os dias são entregues na
+  ordem da janela, então dedup, gravação e estatísticas não dependem de quem respondeu
+  primeiro, e o banco continua sendo escrito por uma thread só.
 - `tamanhoPagina` precisa ficar entre 10 e 500 — a API devolve 400 fora disso.
 
 ## Filtros locais (antes de persistir)
@@ -184,6 +194,9 @@ Tudo por variáveis de ambiente com prefixo `PNCP_` (ou `.env`), ver
 `CONTRATOS_DAYS_BACK`, `SUSPICIOUS_VALIDITY_DAYS`, e os recortes opcionais `CNPJ` e
 `CODIGO_UNIDADE_ADMINISTRATIVA` (o `CNPJ` também recorta a fase 2).
 
+Fase 1: `PAGE_SIZE` (10–500, padrão 100 — subir para 500 é o corte mais direto no número
+de requisições) e `LIST_CONCURRENCY` (1–16 dias em paralelo, padrão 1).
+
 Fase 2: `DETAIL_CONCURRENCY` (1–8 threads), `DETAIL_REQUEST_DELAY` (padrão = `REQUEST_DELAY`),
 `DETAIL_MAX_ATTEMPTS`, `DETAIL_PAGE_SIZE` e `TARGET_FILE_TYPES_ATA` / `TARGET_FILE_TYPES_CONTRATO`.
 
@@ -205,6 +218,9 @@ nem exigem Postgres.
 
 Fase 1: ~455 dias de atas + 401 de contratos ≈ 856 chamadas mínimas, mais a paginação — as
 atas paginam bastante nos dias mais antigos, já que toda ata vigente naquele dia é retornada.
+`LIST_CONCURRENCY` corta o tempo ocioso enquanto se espera a API, mas o teto continua sendo
+1/`REQUEST_DELAY` chamadas por segundo; quanto essa API aguenta antes de responder 429 ainda
+não foi medido (ver docs/API_DETALHE.md, § 1.6, que mediu só a de detalhe).
 
 Fase 2 (medido em 2026-09-15 para um órgão com 891 capas): ~6.450 chamadas a ~8 s cada.
 Ver § Detalhamento e [docs/API_DETALHE.md](docs/API_DETALHE.md).

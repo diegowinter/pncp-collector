@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+import threading
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from itertools import islice
 from typing import Any
 
 from rich.console import Console
@@ -13,6 +17,7 @@ from rich.progress import (
     MofNCompleteColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
@@ -63,6 +68,37 @@ def make_progress(console: Console) -> Progress:
         TimeRemainingColumn(),
         console=console,
     )
+
+
+class _PageTracker:
+    """Alimenta a barra auxiliar de paginas a partir de varias threads.
+
+    Quantas paginas a varredura tem no total so se sabe depois de buscar a
+    primeira pagina de cada dia — `totalPaginas` vem no corpo da resposta. Por
+    isso o total da barra cresce conforme os dias comecam, em vez de ser fixo:
+    e um total parcial, honesto sobre o que ja se conhece.
+    """
+
+    def __init__(self, progress: Progress, task_id: TaskID) -> None:
+        self._progress = progress
+        self._task_id = task_id
+        self._lock = threading.Lock()
+        self._fetched = 0
+        self._known = 0
+        self._days_seen: set[date] = set()
+
+    def __call__(self, day: date, page: int, total_pages: int) -> None:
+        with self._lock:
+            if day not in self._days_seen:
+                self._days_seen.add(day)
+                self._known += total_pages
+            self._fetched += 1
+            self._progress.update(
+                self._task_id,
+                completed=self._fetched,
+                total=self._known,
+                detail=f"{len(self._days_seen)} dias conhecidos",
+            )
 
 
 class Collector:
@@ -211,6 +247,44 @@ class Collector:
             session.commit()
             buffer.clear()
 
+    def _iter_days(
+        self,
+        client: PNCPClient,
+        days: list[date],
+        fetch: Callable[[PNCPClient, date], Iterator[dict[str, Any]]],
+    ) -> Iterator[tuple[date, Callable[[], Iterable[dict[str, Any]]]]]:
+        """Rende (dia, pegar_registros) na ordem de `days`, com ate
+        PNCP_LIST_CONCURRENCY dias sendo buscados em paralelo.
+
+        A entrega e sempre na ordem de `days`, nunca na ordem em que a API
+        respondeu: dedup, gravacao e estatisticas seguem deterministicos, e o
+        banco continua sendo tocado so pela thread principal. Chamar
+        `pegar_registros()` devolve a lista do dia ou levanta DayFetchError.
+
+        Em paralelo, um dia inteiro fica em memoria por worker — a janela e
+        pequena de proposito por isso. Com concorrencia 1 nada muda: os
+        registros seguem sendo consumidos pagina a pagina, sem materializar.
+        """
+        workers = min(self.config.list_concurrency, len(days))
+        if workers <= 1:
+            for day in days:
+                yield day, lambda d=day: fetch(client, d)
+            return
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            upcoming = iter(days)
+            pending: deque[Future[list[dict[str, Any]]]] = deque(
+                pool.submit(lambda d=day: list(fetch(client, d)))
+                for day in islice(upcoming, workers)
+            )
+            for day in days:
+                future = pending.popleft()
+                yield day, future.result
+                # Repoe a janela so depois que o dia foi processado, para nao
+                # buscar mais rapido do que se consegue gravar.
+                nxt = next(upcoming, None)
+                if nxt is not None:
+                    pending.append(pool.submit(lambda d=nxt: list(fetch(client, d))))
 
     def _run(
         self,
@@ -238,39 +312,43 @@ class Collector:
             run_id = run.id
 
         with (
-            PNCPClient(self.config) as client,
             self.session_factory() as session,
             make_progress(self.console) as progress,
         ):
             task = progress.add_task(
                 f"Coletando {dataset}", total=len(days), detail="mantidos 0"
             )
+            pages_task = progress.add_task(
+                "Paginas", total=None, detail="0 dias conhecidos"
+            )
+            tracker = _PageTracker(progress, pages_task)
 
-            for day in days:
-                try:
-                    for raw in fetch(client, day):
-                        self._handle_record(
-                            raw=raw,
-                            normalize=normalize,
-                            model=model,
-                            fields=fields,
-                            today=today,
-                            seen=seen,
-                            ata_keys=ata_keys,
-                            stats=stats,
-                            buffer=buffer,
-                            session=session,
-                        )
-                except DayFetchError as exc:
-                    # Um dia perdido nao derruba a varredura inteira; fica registrado.
-                    stats.failed_days.append(day.isoformat())
-                    logger.error("Dia %s ignorado: %s", day, exc)
+            with PNCPClient(self.config, on_page=tracker) as client:
+                for day, records in self._iter_days(client, days, fetch):
+                    try:
+                        for raw in records():
+                            self._handle_record(
+                                raw=raw,
+                                normalize=normalize,
+                                model=model,
+                                fields=fields,
+                                today=today,
+                                seen=seen,
+                                ata_keys=ata_keys,
+                                stats=stats,
+                                buffer=buffer,
+                                session=session,
+                            )
+                    except DayFetchError as exc:
+                        # Um dia perdido nao derruba a varredura inteira; fica registrado.
+                        stats.failed_days.append(day.isoformat())
+                        logger.error("Dia %s ignorado: %s", day, exc)
 
-                progress.update(
-                    task,
-                    advance=1,
-                    detail=f"mantidos {stats.kept} / descartados {stats.total_discarded}",
-                )
+                    progress.update(
+                        task,
+                        advance=1,
+                        detail=f"mantidos {stats.kept} / descartados {stats.total_discarded}",
+                    )
 
             if buffer:
                 upsert(session, model, buffer)

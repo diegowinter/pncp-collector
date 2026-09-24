@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import date
 from typing import Any
 
@@ -24,6 +25,10 @@ from .ids import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Chamado a cada pagina lida na fase 1: (dia, pagina, total_de_paginas_do_dia).
+#: Roda na thread que fez a requisicao — a implementacao precisa ser thread-safe.
+PageObserver = Callable[[date, int, int], None]
 
 ATAS_PATH = "/api/consulta/v1/atas"
 CONTRATOS_PATH = "/api/consulta/v1/contratos"
@@ -57,15 +62,54 @@ class _RetriesExhausted(Exception):
         self.status_code = status_code
 
 
+class _RateLimiter:
+    """Espaca no tempo as requisicoes de todas as threads: no maximo uma a cada
+    `interval` segundos, somando todo mundo.
+
+    Sem isso, N threads com um `time.sleep` cada uma dariam um ritmo de N/delay
+    — exatamente o que a API de consulta nao aceita.
+    """
+
+    def __init__(self, interval: float) -> None:
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._next_at = 0.0
+
+    def acquire(self) -> None:
+        """Bloqueia ate ser a vez desta thread e reserva o proximo intervalo."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                if now >= self._next_at:
+                    self._next_at = now + self._interval
+                    return
+                wait = self._next_at - now
+            time.sleep(wait)
+
+    def pause(self, seconds: float) -> None:
+        """Segura todas as threads por `seconds`.
+
+        Um 429 nao e problema so de quem o recebeu: com varias requisicoes em
+        voo, as outras vao bater na mesma parede. Quem toma o 429 freia o grupo.
+        """
+        with self._lock:
+            self._next_at = max(self._next_at, time.monotonic() + seconds)
+
+
 class PNCPClient:
     """Acesso aos endpoints de consulta (paginados por dia) e de detalhe. Sem autenticacao.
 
-    Thread-safe: `httpx.Client` pode ser compartilhado; o delay entre chamadas e
-    por thread, entao com N threads o ritmo efetivo e N/delay.
+    Thread-safe: `httpx.Client` pode ser compartilhado. Na consulta (fase 1) o
+    ritmo e global, via `_RateLimiter`; no detalhe (fase 2) continua sendo um
+    `sleep` por thread, porque aquela API nao limita taxa.
     """
 
-    def __init__(self, config: Settings | None = None) -> None:
+    def __init__(
+        self, config: Settings | None = None, on_page: PageObserver | None = None
+    ) -> None:
         self.config = config or default_settings
+        self._on_page = on_page
+        self._limiter = _RateLimiter(self.config.request_delay)
         self._client = httpx.Client(
             base_url=self.config.base_url,
             timeout=self.config.timeout,
@@ -83,14 +127,20 @@ class PNCPClient:
 
     # --- transporte ----------------------------------------------------------
 
-    def _request(self, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
+    def _request(
+        self, path: str, params: dict[str, Any] | None = None, *, throttled: bool = False
+    ) -> httpx.Response:
         """Uma requisicao com retry/backoff em 429/5xx/transporte.
 
         Devolve a resposta para qualquer status nao-retentavel (200, 204, 4xx...):
         quem chama decide o que cada um significa. Esgotou: _RetriesExhausted.
+
+        `throttled` sujeita a chamada ao ritmo global (fase 1).
         """
         last_status: int | None = None
         for attempt in range(self.config.max_retries):
+            if throttled:
+                self._limiter.acquire()
             try:
                 response = self._client.get(path, params=params)
             except httpx.TransportError as exc:
@@ -102,25 +152,28 @@ class PNCPClient:
                 last_status = response.status_code
                 retry_after = response.headers.get("Retry-After")
                 delay = float(retry_after) if retry_after and retry_after.isdigit() else None
-                self._sleep_backoff(attempt, f"HTTP {response.status_code}", delay)
+                waited = self._sleep_backoff(attempt, f"HTTP {response.status_code}", delay)
+                if throttled:
+                    self._limiter.pause(waited)
                 continue
 
             return response
 
         raise _RetriesExhausted(last_status)
 
-    def _sleep_backoff(self, attempt: int, reason: str, delay: float | None = None) -> None:
+    def _sleep_backoff(self, attempt: int, reason: str, delay: float | None = None) -> float:
         wait = delay if delay is not None else (2**attempt) + random.random()
         wait = min(wait, self.config.max_backoff)
         logger.warning("Retry %d (%s); aguardando %.1fs", attempt + 1, reason, wait)
         time.sleep(wait)
+        return wait
 
     # --- consulta (fase 1) ---------------------------------------------------
 
     def _get(self, path: str, params: dict[str, Any]) -> httpx.Response | None:
         """Consulta por dia. Retorna None em 204 (dia vazio); 4xx levanta HTTPStatusError."""
         try:
-            response = self._request(path, params)
+            response = self._request(path, params, throttled=True)
         except _RetriesExhausted as exc:
             raise DayFetchError(
                 f"Falha em {path} com {params} apos {self.config.max_retries} tentativas."
@@ -145,21 +198,27 @@ class PNCPClient:
                 "tamanhoPagina": self.config.page_size,
                 **{k: v for k, v in extra.items() if v is not None},
             }
+            # O espacamento entre paginas fica com o _RateLimiter, que mede
+            # inicio-a-inicio e vale para todas as threads.
             response = self._get(path, params)
-            time.sleep(self.config.request_delay)
 
             if response is None:  # 204: dia sem registros, segue para o proximo
                 return
 
             payload = response.json()
             records = payload.get("data") or []
+            # totalPaginas vem em toda pagina; a primeira ja diz onde parar.
+            total_pages = payload.get("totalPaginas") or 1
+
+            # Antes de render os registros, senao o aviso so chegaria depois de
+            # quem consome terminar de processar a pagina inteira.
+            if self._on_page is not None:
+                self._on_page(day, page, total_pages)
+
             if not records:
                 return
 
             yield from records
-
-            # totalPaginas vem em toda pagina; a primeira ja diz onde parar.
-            total_pages = payload.get("totalPaginas") or 1
             page += 1
 
     def iter_atas(self, day: date) -> Iterator[dict[str, Any]]:
