@@ -183,8 +183,16 @@ class Detailer:
         """Aplica fn a cada item, em paralelo se PNCP_DETAIL_CONCURRENCY > 1. Mantem a ordem."""
         if self.config.detail_concurrency <= 1 or len(items) <= 1:
             return [fn(item) for item in items]
-        with ThreadPoolExecutor(max_workers=self.config.detail_concurrency) as pool:
-            return list(pool.map(fn, items))
+        pool = ThreadPoolExecutor(max_workers=self.config.detail_concurrency)
+        try:
+            results = list(pool.map(fn, items))
+        except BaseException:
+            # Ctrl+C: descarta o que nem comecou em vez de esperar o bloco todo; o
+            # que esta em voo desiste quando o cliente fecha (PNCPClient.__exit__).
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        pool.shutdown()
+        return results
 
     # --- passo A: compra + arquivos, por documento ----------------------------------
 

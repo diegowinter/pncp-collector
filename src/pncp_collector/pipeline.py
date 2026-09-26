@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import logging
+import queue
 import threading
-from collections import deque
-from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from itertools import islice
 from typing import Any
 
 from rich.console import Console
@@ -25,13 +25,18 @@ from rich.progress import (
 from rich.table import Table
 from sqlalchemy.orm import Session, sessionmaker
 
-from .client import DayFetchError, PNCPClient
+from .client import CollectionInterrupted, DayFetchError, PNCPClient
 from .config import Settings, settings as default_settings
 from .db import (
     build_engine,
     build_session_factory,
     create_schema,
+    latest_reference,
     load_ata_keys,
+    load_done_days,
+    load_partial_days,
+    mark_day_done,
+    save_day_progress,
     upsert,
 )
 from .filters import (
@@ -48,6 +53,9 @@ from .schemas import normalize_ata, normalize_contrato
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 500
+
+# (cliente, dia, pagina inicial) -> (pagina, totalPaginas, registros) por pagina
+PageFetch = Callable[[PNCPClient, date, int], Iterator[tuple[int, int, list[dict[str, Any]]]]]
 
 
 def date_range(start: date, end: date) -> list[date]:
@@ -131,13 +139,32 @@ class Collector:
         """Publicacao: retroativo de 400 dias."""
         return date_range(today - timedelta(days=self.config.contratos_days_back), today)
 
+    def days_for(self, dataset: str, reference: date) -> list[date]:
+        return self.ata_days(reference) if dataset == "atas" else self.contrato_days(reference)
+
+    def pending_reference(self, datasets: list[str]) -> date | None:
+        """Referencia da ultima varredura que ficou incompleta, se houver.
+
+        Olha so a referencia mais recente: comecar uma varredura nova (com
+        --reference) abandona a anterior.
+        """
+        with self.session_factory() as session:
+            reference = latest_reference(session, datasets)
+            if reference is None:
+                return None
+            for dataset in datasets:
+                done = load_done_days(session, dataset, reference)
+                if not set(self.days_for(dataset, reference)) <= done:
+                    return reference
+        return None
+
     # --- execucao ------------------------------------------------------------
 
     def collect_atas(self, today: date | None = None) -> FilterStats:
         today = today or date.today()
 
-        def fetch(client: PNCPClient, day: date) -> Iterator[dict[str, Any]]:
-            return client.iter_atas(day)
+        def fetch(client: PNCPClient, day: date, start_page: int):
+            return client.iter_atas_pages(day, start_page)
 
         return self._run(
             dataset="atas",
@@ -157,8 +184,8 @@ class Collector:
         with self.session_factory() as session:
             ata_keys = load_ata_keys(session)
 
-        def fetch(client: PNCPClient, day: date) -> Iterator[dict[str, Any]]:
-            return client.iter_contratos(day)
+        def fetch(client: PNCPClient, day: date, start_page: int):
+            return client.iter_contratos_pages(day, start_page)
 
         return self._run(
             dataset="contratos",
@@ -197,14 +224,12 @@ class Collector:
         self,
         raw: dict[str, Any],
         normalize: Callable[[dict[str, Any]], dict[str, Any]],
-        model: type[Ata] | type[Contrato],
         fields: DatasetFields,
         today: date,
         seen: set[str],
         ata_keys: tuple[set[str], set[str]] | None,
         stats: FilterStats,
         buffer: list[dict[str, Any]],
-        session: Session,
     ) -> None:
         """Aplica dedup e filtros locais e enfileira o registro para gravacao."""
         stats.fetched += 1
@@ -242,64 +267,78 @@ class Collector:
         buffer.append(record)
         stats.kept += 1
 
-        if len(buffer) >= BATCH_SIZE:
-            upsert(session, model, buffer)
-            session.commit()
-            buffer.clear()
+    # --- workers: baixam, nunca gravam -----------------------------------------
 
-    def _iter_days(
+    @staticmethod
+    def _put(out: queue.Queue[_DayEvent], stop: threading.Event, event: _DayEvent) -> None:
+        """put na fila limitada, mas desistindo se a coleta for interrompida."""
+        while True:
+            try:
+                out.put(event, timeout=0.2)
+                return
+            except queue.Full:
+                if stop.is_set():
+                    raise CollectionInterrupted() from None
+
+    def _fetch_day(
         self,
         client: PNCPClient,
-        days: list[date],
-        fetch: Callable[[PNCPClient, date], Iterator[dict[str, Any]]],
-    ) -> Iterator[tuple[date, Callable[[], Iterable[dict[str, Any]]]]]:
-        """Rende (dia, pegar_registros) na ordem de `days`, com ate
-        PNCP_LIST_CONCURRENCY dias sendo buscados em paralelo.
+        fetch: PageFetch,
+        day: date,
+        start_page: int,
+        out: queue.Queue[_DayEvent],
+        stop: threading.Event,
+    ) -> None:
+        """Um dia, pagina a pagina. Cada pagina vai para a fila assim que chega."""
+        try:
+            for page, total_pages, records in fetch(client, day, start_page):
+                self._put(out, stop, _DayEvent(day, page, total_pages, records))
+            self._put(out, stop, _DayEvent(day, done=True))
+        except DayFetchError as exc:
+            self._put(out, stop, _DayEvent(day, error=exc))
+        except CollectionInterrupted:
+            pass  # quem interrompeu foi a thread principal; ela ja esta saindo
+        except BaseException as exc:
+            # Inesperado: sobe para a thread principal em vez de morrer calado.
+            self._put(out, stop, _DayEvent(day, error=exc, fatal=True))
 
-        A entrega e sempre na ordem de `days`, nunca na ordem em que a API
-        respondeu: dedup, gravacao e estatisticas seguem deterministicos, e o
-        banco continua sendo tocado so pela thread principal. Chamar
-        `pegar_registros()` devolve a lista do dia ou levanta DayFetchError.
-
-        Em paralelo, um dia inteiro fica em memoria por worker — a janela e
-        pequena de proposito por isso. Com concorrencia 1 nada muda: os
-        registros seguem sendo consumidos pagina a pagina, sem materializar.
-        """
-        workers = min(self.config.list_concurrency, len(days))
-        if workers <= 1:
-            for day in days:
-                yield day, lambda d=day: fetch(client, d)
-            return
-
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            upcoming = iter(days)
-            pending: deque[Future[list[dict[str, Any]]]] = deque(
-                pool.submit(lambda d=day: list(fetch(client, d)))
-                for day in islice(upcoming, workers)
-            )
-            for day in days:
-                future = pending.popleft()
-                yield day, future.result
-                # Repoe a janela so depois que o dia foi processado, para nao
-                # buscar mais rapido do que se consegue gravar.
-                nxt = next(upcoming, None)
-                if nxt is not None:
-                    pending.append(pool.submit(lambda d=nxt: list(fetch(client, d))))
+    # --- execucao --------------------------------------------------------------
 
     def _run(
         self,
         dataset: str,
         days: list[date],
         today: date,
-        fetch: Callable[[PNCPClient, date], Iterator[dict[str, Any]]],
+        fetch: PageFetch,
         normalize: Callable[[dict[str, Any]], dict[str, Any]],
         model: type[Ata] | type[Contrato],
         fields: DatasetFields,
         seen: set[str],
         ata_keys: tuple[set[str], set[str]] | None = None,
     ) -> FilterStats:
+        """Varre `days` com PNCP_LIST_CONCURRENCY dias em paralelo, um dia por thread.
+
+        As threads so baixam: cada pagina entra numa fila limitada e a thread
+        principal, dona da unica sessao com o banco, filtra e grava pagina a
+        pagina. A fila limitada segura a memoria (quem baixa espera se a
+        gravacao atrasar), e cada commit leva junto a ultima pagina gravada do
+        dia, para uma retomada continuar dali.
+        """
         stats = FilterStats()
         buffer: list[dict[str, Any]] = []
+
+        with self.session_factory() as session:
+            done = load_done_days(session, dataset, today)
+            partial = load_partial_days(session, dataset, today)
+        todo = [day for day in days if day not in done]
+        resumed_pages = sum(partial.get(day, 0) for day in todo)
+        if len(todo) < len(days) or resumed_pages:
+            self.console.print(
+                f"[yellow]Retomando {dataset} (referencia {today}): "
+                f"{len(days) - len(todo)} de {len(days)} dias ja concluidos"
+                + (f", {resumed_pages} paginas de dias em andamento." if resumed_pages else ".")
+                + "[/yellow]"
+            )
 
         with self.session_factory() as session:
             run = CollectionRun(
@@ -316,43 +355,104 @@ class Collector:
             make_progress(self.console) as progress,
         ):
             task = progress.add_task(
-                f"Coletando {dataset}", total=len(days), detail="mantidos 0"
+                f"Coletando {dataset}",
+                total=len(days),
+                completed=len(days) - len(todo),
+                detail="mantidos 0",
             )
             pages_task = progress.add_task(
                 "Paginas", total=None, detail="0 dias conhecidos"
             )
             tracker = _PageTracker(progress, pages_task)
 
+            def show() -> None:
+                progress.update(
+                    task,
+                    detail=f"mantidos {stats.kept} / descartados {stats.total_discarded}",
+                )
+
             with PNCPClient(self.config, on_page=tracker) as client:
-                for day, records in self._iter_days(client, days, fetch):
-                    try:
-                        for raw in records():
+                workers = max(1, min(self.config.list_concurrency, len(todo)))
+                events: queue.Queue[_DayEvent] = queue.Queue(maxsize=workers * 2)
+                stop = threading.Event()
+                upcoming = iter(todo)
+                kept_by_day: dict[date, int] = {}
+                active = 0
+                pool = ThreadPoolExecutor(max_workers=workers)
+
+                def start_next() -> None:
+                    nonlocal active
+                    day = next(upcoming, None)
+                    if day is None:
+                        return
+                    kept_by_day[day] = 0
+                    first = partial.get(day, 0) + 1
+                    pool.submit(self._fetch_day, client, fetch, day, first, events, stop)
+                    active += 1
+
+                try:
+                    for _ in range(workers):
+                        start_next()
+
+                    while active:
+                        try:
+                            # Com timeout: no Windows um get() sem prazo nao
+                            # deixa o Ctrl+C chegar.
+                            event = events.get(timeout=0.5)
+                        except queue.Empty:
+                            continue
+
+                        if event.fatal:
+                            raise event.error  # type: ignore[misc]
+
+                        if event.error is not None or event.done:
+                            if event.error is not None:
+                                # Um dia perdido nao derruba a varredura. As paginas
+                                # ja gravadas ficam; a retomada continua dali.
+                                stats.failed_days.append(event.day.isoformat())
+                                logger.error("Dia %s ignorado: %s", event.day, event.error)
+                            else:
+                                mark_day_done(
+                                    session, dataset, today, event.day, kept_by_day[event.day]
+                                )
+                                session.commit()
+                            active -= 1
+                            progress.update(task, advance=1)
+                            show()
+                            start_next()
+                            continue
+
+                        kept_before = stats.kept
+                        for raw in event.records:
                             self._handle_record(
                                 raw=raw,
                                 normalize=normalize,
-                                model=model,
                                 fields=fields,
                                 today=today,
                                 seen=seen,
                                 ata_keys=ata_keys,
                                 stats=stats,
                                 buffer=buffer,
-                                session=session,
                             )
-                    except DayFetchError as exc:
-                        # Um dia perdido nao derruba a varredura inteira; fica registrado.
-                        stats.failed_days.append(day.isoformat())
-                        logger.error("Dia %s ignorado: %s", day, exc)
-
-                    progress.update(
-                        task,
-                        advance=1,
-                        detail=f"mantidos {stats.kept} / descartados {stats.total_discarded}",
-                    )
-
-            if buffer:
-                upsert(session, model, buffer)
-                session.commit()
+                        kept_by_day[event.day] += stats.kept - kept_before
+                        # Checkpoint: os registros da pagina e o "ate aqui" do dia
+                        # vao no mesmo commit.
+                        if buffer:
+                            upsert(session, model, buffer)
+                            buffer.clear()
+                        save_day_progress(
+                            session, dataset, today, event.day, event.page, event.total_pages
+                        )
+                        session.commit()
+                        show()
+                except BaseException:
+                    # Ctrl+C: as threads param de esperar (retry, fila cheia) e o
+                    # que nem comecou e descartado, em vez de esperar os dias em voo.
+                    stop.set()
+                    client.stop()
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
+                pool.shutdown()
 
             stored = session.get(CollectionRun, run_id)
             if stored is not None:
@@ -362,6 +462,18 @@ class Collector:
 
         return stats
 
+
+@dataclass
+class _DayEvent:
+    """O que um worker manda para a thread principal: uma pagina, o fim do dia ou um erro."""
+
+    day: date
+    page: int = 0
+    total_pages: int = 0
+    records: list[dict[str, Any]] | None = None
+    done: bool = False
+    error: BaseException | None = None
+    fatal: bool = False
 
 def render_summary(console: Console, dataset: str, stats: FilterStats) -> None:
     table = Table(title=f"Resumo - {dataset}")

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import Engine, create_engine, func, select, update
+from sqlalchemy import Engine, create_engine, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -16,6 +16,8 @@ from .models import (
     Arquivo,
     Ata,
     Base,
+    CollectionDay,
+    CollectionDayProgress,
     CollectionRun,
     Compra,
     Contrato,
@@ -45,18 +47,24 @@ def drop_schema(engine: Engine) -> None:
 
 
 def upsert(session: Session, model: type[Base], rows: Sequence[dict[str, Any]]) -> int:
-    """Insere ou atualiza pela chave primaria. Reexecucoes ficam idempotentes."""
+    """Insere ou atualiza pela chave primaria. Reexecucoes ficam idempotentes.
+
+    No conflito so as colunas que vieram nas linhas sao atualizadas: as demais
+    (o estado da fase 2 numa capa, por exemplo) ficam como estao, em vez de
+    voltar ao default.
+    """
     if not rows:
         return 0
 
     primary_key = [column.name for column in model.__table__.primary_key.columns]
     preserved = set(primary_key) | {"collected_at", "updated_at"}
+    sent = set().union(*(row.keys() for row in rows))
 
     statement = insert(model).values(list(rows))
     updatable = {
         column.name: statement.excluded[column.name]
         for column in model.__table__.columns
-        if column.name not in preserved
+        if column.name in sent and column.name not in preserved
     }
     updatable["updated_at"] = func.now()
     statement = statement.on_conflict_do_update(
@@ -64,6 +72,76 @@ def upsert(session: Session, model: type[Base], rows: Sequence[dict[str, Any]]) 
     )
     session.execute(statement)
     return len(rows)
+
+
+
+# --- checkpoint da fase 1 ------------------------------------------------------
+
+
+def load_done_days(session: Session, dataset: str, reference: date) -> set[date]:
+    query = select(CollectionDay.day).where(
+        CollectionDay.dataset == dataset, CollectionDay.reference == reference
+    )
+    return set(session.scalars(query))
+
+
+def mark_day_done(
+    session: Session, dataset: str, reference: date, day: date, records: int
+) -> None:
+    """Sem commit: quem chama grava junto com os registros do dia."""
+    statement = insert(CollectionDay).values(
+        dataset=dataset, reference=reference, day=day, records=records
+    )
+    session.execute(
+        statement.on_conflict_do_update(
+            index_elements=["dataset", "reference", "day"],
+            set_={"records": statement.excluded.records, "finished_at": func.now()},
+        )
+    )
+    session.execute(
+        delete(CollectionDayProgress).where(
+            CollectionDayProgress.dataset == dataset,
+            CollectionDayProgress.reference == reference,
+            CollectionDayProgress.day == day,
+        )
+    )
+
+
+def load_partial_days(session: Session, dataset: str, reference: date) -> dict[date, int]:
+    """Dia em andamento -> ultima pagina gravada."""
+    query = select(CollectionDayProgress.day, CollectionDayProgress.pages_done).where(
+        CollectionDayProgress.dataset == dataset, CollectionDayProgress.reference == reference
+    )
+    return dict(session.execute(query).all())
+
+
+def save_day_progress(
+    session: Session, dataset: str, reference: date, day: date, pages_done: int, total_pages: int
+) -> None:
+    """Sem commit: vai no mesmo commit dos registros da pagina."""
+    statement = insert(CollectionDayProgress).values(
+        dataset=dataset,
+        reference=reference,
+        day=day,
+        pages_done=pages_done,
+        total_pages=total_pages,
+    )
+    session.execute(
+        statement.on_conflict_do_update(
+            index_elements=["dataset", "reference", "day"],
+            set_={
+                "pages_done": statement.excluded.pages_done,
+                "total_pages": statement.excluded.total_pages,
+                "updated_at": func.now(),
+            },
+        )
+    )
+
+
+def latest_reference(session: Session, datasets: Sequence[str]) -> date | None:
+    return session.scalar(
+        select(func.max(CollectionDay.reference)).where(CollectionDay.dataset.in_(list(datasets)))
+    )
 
 
 def load_ata_keys(session: Session) -> tuple[set[str], set[str]]:
@@ -168,7 +246,7 @@ class DetailRepository:
         tipo: str,
         statuses: Sequence[str],
         *,
-        max_attempts: int,
+        max_attempts: int | None,
         limit: int | None = None,
         cnpj: str | None = None,
     ) -> list[DocumentRow]:
@@ -176,7 +254,7 @@ class DetailRepository:
 
         Uma capa pendente que ja passou pelo passo A (compra_key e detailed_at
         preenchidos) esta esperando a compra fechar, nao o passo A: fica de fora.
-        Em erro, so ate max_attempts.
+        Em erro, so ate max_attempts (None = sem limite).
         """
         model = DOCUMENT_MODELS[tipo]
         query = select(model).where(model.detail_status.in_(list(statuses)))
@@ -187,12 +265,13 @@ class DetailRepository:
                 & model.detailed_at.is_not(None)
             )
         )
-        query = query.where(
-            ~(
-                (model.detail_status == DetailStatus.ERRO)
-                & (model.detail_attempts >= max_attempts)
+        if max_attempts is not None:
+            query = query.where(
+                ~(
+                    (model.detail_status == DetailStatus.ERRO)
+                    & (model.detail_attempts >= max_attempts)
+                )
             )
-        )
         if cnpj:
             cnpj_column = model.cnpj_orgao if tipo == "ata" else model.orgao_entidade_cnpj
             query = query.where(cnpj_column == cnpj)
@@ -258,35 +337,39 @@ class DetailRepository:
         )
 
     def select_compras_for_items(
-        self, statuses: Sequence[str], *, max_attempts: int, limit: int | None = None
+        self, statuses: Sequence[str], *, max_attempts: int | None, limit: int | None = None
     ) -> list[CompraRow]:
         """Compras com pelo menos um documento pendente (isto e, com arquivo alvo)."""
         query = select(Compra).where(Compra.items_status.in_(list(statuses)))
-        query = query.where(
-            ~(
-                (Compra.items_status == ItemsStatus.ERRO)
-                & (Compra.items_attempts >= max_attempts)
+        if max_attempts is not None:
+            query = query.where(
+                ~(
+                    (Compra.items_status == ItemsStatus.ERRO)
+                    & (Compra.items_attempts >= max_attempts)
+                )
             )
-        )
         query = query.where(self._has_pending_document())
         if limit:
             query = query.limit(limit)
         return [_compra_row(obj) for obj in self.session.scalars(query)]
 
     def select_compras_for_results(
-        self, *, max_attempts: int, limit: int | None = None
+        self, *, max_attempts: int | None, limit: int | None = None
     ) -> list[CompraRow]:
         query = select(Compra).where(
             Compra.items_status == ItemsStatus.OK,
             Compra.results_status.in_(
                 [ResultsStatus.PENDENTE, ResultsStatus.PARCIAL, ResultsStatus.ERRO]
             ),
-            ~(
-                (Compra.results_status == ResultsStatus.ERRO)
-                & (Compra.results_attempts >= max_attempts)
-            ),
             self._has_pending_document(),
         )
+        if max_attempts is not None:
+            query = query.where(
+                ~(
+                    (Compra.results_status == ResultsStatus.ERRO)
+                    & (Compra.results_attempts >= max_attempts)
+                )
+            )
         if limit:
             query = query.limit(limit)
         return [_compra_row(obj) for obj in self.session.scalars(query)]

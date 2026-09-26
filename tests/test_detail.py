@@ -170,7 +170,7 @@ class MemoryRepository:
                 continue
             if d["detail_status"] == DetailStatus.PENDENTE and d["compra_key"] and d["detailed_at"]:
                 continue
-            if d["detail_status"] == DetailStatus.ERRO and d["detail_attempts"] >= max_attempts:
+            if d["detail_status"] == DetailStatus.ERRO and max_attempts is not None and d["detail_attempts"] >= max_attempts:
                 continue
             rows.append(self._doc_row(tipo, id))
         return rows[:limit] if limit else rows
@@ -240,7 +240,7 @@ class MemoryRepository:
             self._compra_row(c)
             for key, c in self.compras.items()
             if c["items_status"] in statuses
-            and not (c["items_status"] == ItemsStatus.ERRO and c["items_attempts"] >= max_attempts)
+            and not (c["items_status"] == ItemsStatus.ERRO and max_attempts is not None and c["items_attempts"] >= max_attempts)
             and self._pending_docs_of(key)
         ]
         return rows[:limit] if limit else rows
@@ -251,7 +251,7 @@ class MemoryRepository:
             for key, c in self.compras.items()
             if c["items_status"] == ItemsStatus.OK
             and c["results_status"] in (ResultsStatus.PENDENTE, ResultsStatus.PARCIAL, ResultsStatus.ERRO)
-            and not (c["results_status"] == ResultsStatus.ERRO and c["results_attempts"] >= max_attempts)
+            and not (c["results_status"] == ResultsStatus.ERRO and max_attempts is not None and c["results_attempts"] >= max_attempts)
             and self._pending_docs_of(key)
         ]
         return rows[:limit] if limit else rows
@@ -555,3 +555,16 @@ def test_concurrency_mantem_o_resultado(world):
     assert stats.results_stored == 14
     assert all(repo.status("ata", ata_id(13, s)) == DetailStatus.OK for s in range(1, 6))
     assert sum(1 for r in repo.resultados.values() if r["is_winner"]) == 7
+
+
+def test_sem_max_attempts_erro_e_revisitado_sempre(world):
+    detailer, repo, client = world
+    detailer.config.detail_max_attempts = None
+    repo.add_ata(ata_id(9))
+    client.arquivos[ata_id(9)] = DetailFetchError("x", 429, "esgotou")
+
+    for _ in range(6):
+        detailer.run()
+
+    assert repo.docs["ata"][ata_id(9)]["detail_attempts"] == 6
+    assert client.count("arquivos_ata") == 6

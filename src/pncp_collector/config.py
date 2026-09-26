@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     # não um delay por thread.
     request_delay: float = 0.5  # segundos entre requisições
     timeout: float = 60.0
-    max_retries: int = 8
+    # Tentativas por requisicao em 429/5xx/transporte; None = sem limite.
+    max_retries: int | None = Field(default=None, ge=1)
     max_backoff: float = 60.0
 
     # Dias buscados em paralelo na fase 1. A API de consulta e rapida mas
@@ -59,8 +60,9 @@ class Settings(BaseSettings):
     target_file_types_ata: str = ""
     target_file_types_contrato: str = "Contrato,Nota de Empenho"
 
-    # Documento/compra em erro deixa de ser revisitado apos N tentativas.
-    detail_max_attempts: int = 5
+    # Documento/compra em erro deixa de ser revisitado apos N tentativas;
+    # None = revisitado em toda execucao.
+    detail_max_attempts: int | None = Field(default=None, ge=1)
 
     # Threads nas chamadas de detalhe (a latencia e do servidor, nao throttling).
     detail_concurrency: int = Field(default=1, ge=1, le=8)

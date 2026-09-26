@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import itertools
 import random
 import threading
 import time
@@ -54,6 +55,10 @@ class DetailNotFound(DetailFetchError):
     """404/410: o recurso nao existe (ou foi removido) no PNCP."""
 
 
+class CollectionInterrupted(Exception):
+    """O cliente foi parado (Ctrl+C): chamadas em voo desistem na proxima espera."""
+
+
 class _RetriesExhausted(Exception):
     """Interno: _request esgotou as tentativas. Carrega o ultimo status visto."""
 
@@ -70,10 +75,11 @@ class _RateLimiter:
     — exatamente o que a API de consulta nao aceita.
     """
 
-    def __init__(self, interval: float) -> None:
+    def __init__(self, interval: float, stop: threading.Event | None = None) -> None:
         self._interval = interval
         self._lock = threading.Lock()
         self._next_at = 0.0
+        self._stop = stop or threading.Event()
 
     def acquire(self) -> None:
         """Bloqueia ate ser a vez desta thread e reserva o proximo intervalo."""
@@ -84,7 +90,8 @@ class _RateLimiter:
                     self._next_at = now + self._interval
                     return
                 wait = self._next_at - now
-            time.sleep(wait)
+            if self._stop.wait(wait):
+                raise CollectionInterrupted()
 
     def pause(self, seconds: float) -> None:
         """Segura todas as threads por `seconds`.
@@ -109,7 +116,8 @@ class PNCPClient:
     ) -> None:
         self.config = config or default_settings
         self._on_page = on_page
-        self._limiter = _RateLimiter(self.config.request_delay)
+        self._stop = threading.Event()
+        self._limiter = _RateLimiter(self.config.request_delay, self._stop)
         self._client = httpx.Client(
             base_url=self.config.base_url,
             timeout=self.config.timeout,
@@ -120,7 +128,12 @@ class PNCPClient:
         return self
 
     def __exit__(self, *exc: object) -> None:
+        # Saindo (inclusive por Ctrl+C): threads ainda em retry param de esperar.
+        self.stop()
         self.close()
+
+    def stop(self) -> None:
+        self._stop.set()
 
     def close(self) -> None:
         self._client.close()
@@ -133,12 +146,17 @@ class PNCPClient:
         """Uma requisicao com retry/backoff em 429/5xx/transporte.
 
         Devolve a resposta para qualquer status nao-retentavel (200, 204, 4xx...):
-        quem chama decide o que cada um significa. Esgotou: _RetriesExhausted.
+        quem chama decide o que cada um significa. Esgotou: _RetriesExhausted
+        (nunca, com max_retries=None).
 
         `throttled` sujeita a chamada ao ritmo global (fase 1).
         """
         last_status: int | None = None
-        for attempt in range(self.config.max_retries):
+        max_retries = self.config.max_retries
+        attempts = itertools.count() if max_retries is None else range(max_retries)
+        for attempt in attempts:
+            if self._stop.is_set():
+                raise CollectionInterrupted()
             if throttled:
                 self._limiter.acquire()
             try:
@@ -165,8 +183,13 @@ class PNCPClient:
         wait = delay if delay is not None else (2**attempt) + random.random()
         wait = min(wait, self.config.max_backoff)
         logger.warning("Retry %d (%s); aguardando %.1fs", attempt + 1, reason, wait)
-        time.sleep(wait)
+        self._pause(wait)
         return wait
+
+    def _pause(self, seconds: float) -> None:
+        """Espera o backoff, mas acorda na hora se o cliente for parado."""
+        if self._stop.wait(seconds):
+            raise CollectionInterrupted()
 
     # --- consulta (fase 1) ---------------------------------------------------
 
@@ -185,10 +208,17 @@ class PNCPClient:
         return response
 
     def _iter_day(self, path: str, day: date, extra: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        """Percorre todas as paginas de um unico dia (dataInicial == dataFinal)."""
+        """Todos os registros de um unico dia (dataInicial == dataFinal)."""
+        for _, _, records in self._iter_day_pages(path, day, extra):
+            yield from records
+
+    def _iter_day_pages(
+        self, path: str, day: date, extra: dict[str, Any], start_page: int = 1
+    ) -> Iterator[tuple[int, int, list[dict[str, Any]]]]:
+        """Rende (pagina, totalPaginas, registros) de um dia, a partir de start_page."""
         stamp = day.strftime("%Y%m%d")
-        page = 1
-        total_pages = 1
+        page = start_page
+        total_pages = start_page
 
         while page <= total_pages:
             params: dict[str, Any] = {
@@ -218,30 +248,38 @@ class PNCPClient:
             if not records:
                 return
 
-            yield from records
+            yield page, total_pages, records
             page += 1
+
+    def _atas_filters(self) -> dict[str, Any]:
+        return {
+            "cnpj": self.config.cnpj,
+            "codigoUnidadeAdministrativa": self.config.codigo_unidade_administrativa,
+        }
 
     def iter_atas(self, day: date) -> Iterator[dict[str, Any]]:
         """Atas vigentes no dia D (o filtro do endpoint e por vigencia)."""
-        return self._iter_day(
-            ATAS_PATH,
-            day,
-            {
-                "cnpj": self.config.cnpj,
-                "codigoUnidadeAdministrativa": self.config.codigo_unidade_administrativa,
-            },
-        )
+        return self._iter_day(ATAS_PATH, day, self._atas_filters())
+
+    def iter_atas_pages(
+        self, day: date, start_page: int = 1
+    ) -> Iterator[tuple[int, int, list[dict[str, Any]]]]:
+        return self._iter_day_pages(ATAS_PATH, day, self._atas_filters(), start_page)
+
+    def _contratos_filters(self) -> dict[str, Any]:
+        return {
+            "cnpjOrgao": self.config.cnpj,
+            "codigoUnidadeAdministrativa": self.config.codigo_unidade_administrativa,
+        }
 
     def iter_contratos(self, day: date) -> Iterator[dict[str, Any]]:
         """Contratos publicados no dia D."""
-        return self._iter_day(
-            CONTRATOS_PATH,
-            day,
-            {
-                "cnpjOrgao": self.config.cnpj,
-                "codigoUnidadeAdministrativa": self.config.codigo_unidade_administrativa,
-            },
-        )
+        return self._iter_day(CONTRATOS_PATH, day, self._contratos_filters())
+
+    def iter_contratos_pages(
+        self, day: date, start_page: int = 1
+    ) -> Iterator[tuple[int, int, list[dict[str, Any]]]]:
+        return self._iter_day_pages(CONTRATOS_PATH, day, self._contratos_filters(), start_page)
 
     # --- detalhe (fase 2) ----------------------------------------------------
 

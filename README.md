@@ -57,8 +57,20 @@ Uma chamada por dia, com `dataInicial == dataFinal`, paginando de 100 em 100.
 - Sem autenticação; header `accept: */*`.
 - Delay entre requisições (padrão 0,5s) e retry com backoff exponencial em 429/5xx
   (`PNCP_REQUEST_DELAY`, `PNCP_MAX_RETRIES`, `PNCP_MAX_BACKOFF`). A API limita taxa com
-  frequência: um dia de contratos (83 páginas) leva alguns minutos. Um dia que esgota as
-  tentativas é registrado em `failed_days` e a varredura continua.
+  frequência: um dia de contratos (83 páginas) leva alguns minutos. Sem `PNCP_MAX_RETRIES`
+  as tentativas são infinitas; com ele, um dia que esgota as tentativas é registrado em
+  `failed_days` e a varredura continua.
+- **Gravação por página:** cada thread busca um dia (`LIST_CONCURRENCY` dias em paralelo) e
+  entrega página a página numa fila limitada; só a thread principal, com uma única conexão,
+  filtra e grava. Se a gravação atrasa, quem baixa espera, então a memória fica em poucas
+  páginas, não em dias inteiros.
+- **Retomada:** cada commit leva os registros da página e a última página gravada do dia
+  (`collection_day_progress`); dia completo vai para `collection_days`. Sem `--reference`,
+  `atas`, `contratos` e `all` retomam a última varredura incompleta: pulam os dias feitos e
+  continuam os dias em andamento da página seguinte. Dias com falha ficam para a próxima
+  execução. Rodar a fase 1 de novo não mexe no estado da fase 2 das capas.
+- **Ctrl+C** encerra na hora: as chamadas em retry desistem, em vez de esperar os dias (ou
+  o bloco da fase 2) que estavam em andamento.
 - O progresso tem duas barras: **dias** (total fixo, a janela) e **páginas** (total parcial —
   quantas páginas um dia tem só se sabe ao ler a primeira, via `totalPaginas`, então o total
   cresce conforme os dias começam). A segunda existe porque um único dia pode ter dezenas de
@@ -129,7 +141,7 @@ configuráveis por `PNCP_TARGET_FILE_TYPES_ATA` / `_CONTRATO`.
 | Status | Revisita? | Por quê |
 |---|---|---|
 | `pendente` | sim | ainda não foi, ou a compra não fechou |
-| `erro` | até `PNCP_DETAIL_MAX_ATTEMPTS` | transitório |
+| `erro` | sempre, ou até `PNCP_DETAIL_MAX_ATTEMPTS` se definido | transitório |
 | `sem_homologado` | sim | a homologação pode ter saído depois; a compra é reconsultada |
 | `sem_arquivo` | só com `--revisit-sem-arquivo` | raro mudar |
 | `sem_identificacao` | não | a capa não muda sem nova fase 1 |
@@ -192,7 +204,8 @@ Tudo por variáveis de ambiente com prefixo `PNCP_` (ou `.env`), ver
 [.env.example](.env.example): `DATABASE_URL`, `REQUEST_DELAY`, `MAX_RETRIES`,
 `PAGE_SIZE`, `SIGNATURE_MAX_AGE_DAYS`, `ATAS_DAYS_BACK`, `ATAS_DAYS_AHEAD`,
 `CONTRATOS_DAYS_BACK`, `SUSPICIOUS_VALIDITY_DAYS`, e os recortes opcionais `CNPJ` e
-`CODIGO_UNIDADE_ADMINISTRATIVA` (o `CNPJ` também recorta a fase 2).
+`CODIGO_UNIDADE_ADMINISTRATIVA` (o `CNPJ` também recorta a fase 2). `MAX_RETRIES` e
+`DETAIL_MAX_ATTEMPTS` não têm limite quando não definidos.
 
 Fase 1: `PAGE_SIZE` (10–500, padrão 100 — subir para 500 é o corte mais direto no número
 de requisições) e `LIST_CONCURRENCY` (1–16 dias em paralelo, padrão 1).

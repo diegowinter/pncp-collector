@@ -15,11 +15,13 @@ DAY = date(2026, 9, 8)
 
 def make_client(handler, **overrides):
     config = Settings(
-        database_url="postgresql+psycopg://x/y",
-        request_delay=0.0,
-        max_retries=3,
-        page_size=10,
-        **overrides,
+        **{
+            "database_url": "postgresql+psycopg://x/y",
+            "request_delay": 0.0,
+            "max_retries": 3,
+            "page_size": 10,
+            **overrides,
+        }
     )
     instance = PNCPClient(config)
     instance._client = httpx.Client(
@@ -100,7 +102,7 @@ def test_429_na_consulta_freia_o_grupo(monkeypatch):
         return page([{"a": 1}])
 
     c = make_client(handler)
-    monkeypatch.setattr("pncp_collector.client.time.sleep", lambda s: None)
+    monkeypatch.setattr("pncp_collector.client.PNCPClient._pause", lambda self, s: None)
     paused: list[float] = []
     monkeypatch.setattr(c._limiter, "pause", lambda s: paused.append(s))
 
@@ -114,7 +116,31 @@ def test_204_continua_sendo_dia_vazio():
 
 
 def test_429_ate_esgotar_vira_day_fetch_error(monkeypatch):
-    monkeypatch.setattr("pncp_collector.client.time.sleep", lambda s: None)
+    monkeypatch.setattr("pncp_collector.client.PNCPClient._pause", lambda self, s: None)
     c = make_client(lambda request: httpx.Response(429))
     with pytest.raises(DayFetchError):
         list(c.iter_atas(DAY))
+
+
+def test_cliente_parado_desiste_do_retry_na_hora():
+    """Ctrl+C: quem esta esperando backoff acorda e desiste, sem esgotar tentativas."""
+    import threading
+
+    from pncp_collector.client import CollectionInterrupted
+
+    c = make_client(lambda request: httpx.Response(503), max_retries=None, max_backoff=30.0)
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            list(c.iter_atas(DAY))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    time.sleep(0.2)
+    c.stop()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert isinstance(errors[0], CollectionInterrupted)

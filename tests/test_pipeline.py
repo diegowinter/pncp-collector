@@ -52,8 +52,43 @@ def collector(monkeypatch):
         session.store[key].extend(rows)
         return len(rows)
 
+    store["done"] = set()
+    store["pages"] = {}  # (dataset, reference, day) -> pagina gravada
+
+    def fake_load_done_days(session, dataset, reference):
+        return {day for (ds, ref, day) in session.store["done"] if (ds, ref) == (dataset, reference)}
+
+    def fake_mark_day_done(session, dataset, reference, day, records):
+        session.store["done"].add((dataset, reference, day))
+        session.store["pages"].pop((dataset, reference, day), None)
+
+    def fake_load_partial_days(session, dataset, reference):
+        return {
+            day: page
+            for (ds, ref, day), page in session.store["pages"].items()
+            if (ds, ref) == (dataset, reference)
+        }
+
+    def fake_save_day_progress(session, dataset, reference, day, pages_done, total_pages):
+        session.store["pages"][(dataset, reference, day)] = pages_done
+
     monkeypatch.setattr("pncp_collector.pipeline.upsert", fake_upsert)
+    monkeypatch.setattr("pncp_collector.pipeline.load_done_days", fake_load_done_days)
+    monkeypatch.setattr("pncp_collector.pipeline.mark_day_done", fake_mark_day_done)
+    monkeypatch.setattr("pncp_collector.pipeline.load_partial_days", fake_load_partial_days)
+    monkeypatch.setattr("pncp_collector.pipeline.save_day_progress", fake_save_day_progress)
     return instance
+
+
+def paged(fetch):
+    """Adapta um fetch(client, dia) -> registros para o formato por pagina (1 pagina)."""
+
+    def fetch_pages(client, day, start_page):
+        records = list(fetch(client, day))
+        if records:
+            yield 1, 1, records
+
+    return fetch_pages
 
 
 def run_dataset(collector, monkeypatch, dataset, pages, ata_keys=None):
@@ -68,6 +103,9 @@ def run_dataset(collector, monkeypatch, dataset, pages, ata_keys=None):
 
         def __exit__(self, *exc):
             return False
+
+        def stop(self):
+            pass
 
     monkeypatch.setattr(pipeline, "PNCPClient", FakeClient)
 
@@ -84,7 +122,7 @@ def run_dataset(collector, monkeypatch, dataset, pages, ata_keys=None):
         dataset=dataset,
         days=days,
         today=TODAY,
-        fetch=fetch,
+        fetch=paged(fetch),
         normalize=normalize,
         model=model,
         fields=fields,
@@ -214,6 +252,9 @@ def test_dia_com_falha_nao_derruba_a_varredura(collector, monkeypatch):
         def __exit__(self, *exc):
             return False
 
+        def stop(self):
+            pass
+
     monkeypatch.setattr(pipeline, "PNCPClient", FakeClient)
 
     def fetch(client, day):
@@ -225,7 +266,7 @@ def test_dia_com_falha_nao_derruba_a_varredura(collector, monkeypatch):
         dataset="atas",
         days=[date(2026, 9, 1), date(2026, 9, 2)],
         today=TODAY,
-        fetch=fetch,
+        fetch=paged(fetch),
         normalize=pipeline.normalize_ata,
         model=Ata,
         fields=ATA_FIELDS,
@@ -252,6 +293,9 @@ def run_days(collector, monkeypatch, days, fetch, concurrency):
         def __exit__(self, *exc):
             return False
 
+        def stop(self):
+            pass
+
     monkeypatch.setattr(pipeline, "PNCPClient", FakeClient)
     collector.config = collector.config.model_copy(
         update={"list_concurrency": concurrency}
@@ -260,7 +304,7 @@ def run_days(collector, monkeypatch, days, fetch, concurrency):
         dataset="atas",
         days=days,
         today=TODAY,
-        fetch=fetch,
+        fetch=paged(fetch),
         normalize=pipeline.normalize_ata,
         model=Ata,
         fields=ATA_FIELDS,
@@ -268,24 +312,23 @@ def run_days(collector, monkeypatch, days, fetch, concurrency):
     )
 
 
-def test_concorrencia_preserva_a_ordem_dos_dias(collector, monkeypatch):
-    """Quem responde primeiro nao muda a ordem de gravacao: o dia 1 vem antes
-    do dia 5 mesmo demorando mais para chegar."""
+def test_concorrencia_grava_na_ordem_de_chegada_sem_perder_dia(collector, monkeypatch):
+    """Cada pagina e gravada quando chega: dia lento nao segura os outros."""
     import time
 
     days = [date(2026, 9, d) for d in range(1, 6)]
 
     def fetch(client, day):
-        # Os primeiros dias sao os mais lentos: sem ordenacao explicita, a
-        # gravacao sairia invertida.
-        time.sleep((6 - day.day) * 0.01)
+        time.sleep((6 - day.day) * 0.01)  # os primeiros dias sao os mais lentos
         return iter([ata_payload(f"A-{day.day}")])
 
-    stats = run_days(collector, monkeypatch, days, fetch, concurrency=4)
+    stats = run_days(collector, monkeypatch, days, fetch, concurrency=5)
 
     assert stats.kept == 5
     gravados = [row["numero_controle_pncp_ata"] for row in collector.store["atas"]]
-    assert gravados == ["A-1", "A-2", "A-3", "A-4", "A-5"]
+    assert sorted(gravados) == ["A-1", "A-2", "A-3", "A-4", "A-5"]
+    assert gravados[0] == "A-5"
+    assert collector.store["done"] == {("atas", TODAY, d) for d in days}
 
 
 def test_concorrencia_mantem_o_dedup_entre_dias(collector, monkeypatch):
@@ -305,7 +348,7 @@ def test_concorrencia_mantem_o_dedup_entre_dias(collector, monkeypatch):
     assert stats.kept == 4
     assert stats.duplicates == 3
     gravados = [row["numero_controle_pncp_ata"] for row in collector.store["atas"]]
-    assert gravados == ["A-1", "A-2", "A-3", "A-4"]
+    assert sorted(gravados) == ["A-1", "A-2", "A-3", "A-4"]
 
 
 def test_concorrencia_busca_dias_em_paralelo(collector, monkeypatch):
@@ -338,7 +381,7 @@ def test_dia_com_falha_em_paralelo_nao_derruba_os_outros(collector, monkeypatch)
 
     stats = run_days(collector, monkeypatch, days, fetch, concurrency=4)
 
-    assert stats.failed_days == ["2026-09-02", "2026-09-03"]
+    assert sorted(stats.failed_days) == ["2026-09-02", "2026-09-03"]
     assert stats.kept == 2
 
 
@@ -418,3 +461,196 @@ def test_cliente_avisa_cada_pagina_com_o_total_do_dia():
     day = date(2026, 9, 1)
     assert len(list(c.iter_atas(day))) == 3
     assert vistos == [(day, 1, 3), (day, 2, 3), (day, 3, 3)]
+
+
+def test_dias_concluidos_sao_marcados_e_pulados_na_retomada(collector, monkeypatch):
+    pages = {
+        date(2026, 9, 1): [ata_payload("A-1")],
+        date(2026, 9, 2): [ata_payload("A-2")],
+        date(2026, 9, 3): [ata_payload("A-3")],
+    }
+    collector.store["done"].add(("atas", TODAY, date(2026, 9, 1)))
+
+    stats = run_dataset(collector, monkeypatch, "atas", pages)
+
+    assert stats.fetched == 2  # o dia 1 ja estava feito
+    assert {r["numero_controle_pncp_ata"] for r in collector.store["atas"]} == {"A-2", "A-3"}
+    assert collector.store["done"] == {("atas", TODAY, d) for d in pages}
+
+
+def test_dia_com_falha_nao_e_marcado_como_concluido(collector, monkeypatch):
+    from pncp_collector import pipeline
+    from pncp_collector.client import DayFetchError
+
+    class FakeClient:
+        def __init__(self, config, on_page=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(pipeline, "PNCPClient", FakeClient)
+
+    def fetch(client, day):
+        if day == date(2026, 9, 1):
+            raise DayFetchError("429 sem fim")
+        return iter([ata_payload("A-1")])
+
+    collector._run(
+        dataset="atas",
+        days=[date(2026, 9, 1), date(2026, 9, 2)],
+        today=TODAY,
+        fetch=paged(fetch),
+        normalize=pipeline.normalize_ata,
+        model=Ata,
+        fields=ATA_FIELDS,
+        seen=set(),
+    )
+    assert collector.store["done"] == {("atas", TODAY, date(2026, 9, 2))}
+
+
+def test_pending_reference_acha_varredura_incompleta(collector):
+    from pncp_collector import pipeline
+
+    ref = date(2026, 9, 1)
+    days = collector.ata_days(ref)
+    collector.store["done"] |= {("atas", ref, d) for d in days[:10]}
+
+    def fake_latest(session, datasets):
+        refs = [r for (ds, r, _) in session.store["done"] if ds in datasets]
+        return max(refs) if refs else None
+
+    pipeline_latest = pipeline.latest_reference
+    pipeline.latest_reference = fake_latest
+    try:
+        assert collector.pending_reference(["atas"]) == ref
+        assert collector.pending_reference(["contratos"]) is None
+        collector.store["done"] |= {("atas", ref, d) for d in days}
+        assert collector.pending_reference(["atas"]) is None
+        # `all`: atas completas mas contratos nem comecaram -> ainda pendente
+        assert collector.pending_reference(["atas", "contratos"]) == ref
+    finally:
+        pipeline.latest_reference = pipeline_latest
+
+
+# --- gravacao e retomada por pagina ------------------------------------------
+
+
+def run_pages(collector, monkeypatch, days, fetch_pages, concurrency=2):
+    from pncp_collector import pipeline
+
+    class FakeClient:
+        def __init__(self, config, on_page=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(pipeline, "PNCPClient", FakeClient)
+    collector.config = collector.config.model_copy(update={"list_concurrency": concurrency})
+    return collector._run(
+        dataset="atas",
+        days=days,
+        today=TODAY,
+        fetch=fetch_pages,
+        normalize=pipeline.normalize_ata,
+        model=Ata,
+        fields=ATA_FIELDS,
+        seen=set(),
+    )
+
+
+def test_cada_pagina_e_gravada_e_registrada(collector, monkeypatch):
+    day = date(2026, 9, 1)
+
+    def fetch_pages(client, d, start_page):
+        for page in range(start_page, 4):
+            yield page, 3, [ata_payload(f"A-{page}")]
+
+    stats = run_pages(collector, monkeypatch, [day], fetch_pages, concurrency=1)
+
+    assert stats.kept == 3
+    assert ("atas", TODAY, day) in collector.store["done"]
+    assert collector.store["pages"] == {}  # dia concluido nao deixa progresso parcial
+
+
+def test_retomada_continua_da_pagina_seguinte(collector, monkeypatch):
+    day = date(2026, 9, 1)
+    collector.store["pages"][("atas", TODAY, day)] = 2
+    starts = []
+
+    def fetch_pages(client, d, start_page):
+        starts.append(start_page)
+        for page in range(start_page, 5):
+            yield page, 4, [ata_payload(f"A-{page}")]
+
+    stats = run_pages(collector, monkeypatch, [day], fetch_pages)
+
+    assert starts == [3]
+    assert stats.fetched == 2  # paginas 3 e 4
+    assert ("atas", TODAY, day) in collector.store["done"]
+
+
+def test_falha_no_meio_do_dia_guarda_as_paginas_ja_gravadas(collector, monkeypatch):
+    from pncp_collector.client import DayFetchError
+
+    day = date(2026, 9, 1)
+
+    def fetch_pages(client, d, start_page):
+        yield 1, 5, [ata_payload("A-1")]
+        yield 2, 5, [ata_payload("A-2")]
+        raise DayFetchError("429 sem fim")
+
+    stats = run_pages(collector, monkeypatch, [day], fetch_pages)
+
+    assert stats.failed_days == ["2026-09-01"]
+    assert collector.store["pages"] == {("atas", TODAY, day): 2}
+    assert collector.store["done"] == set()
+    assert {r["numero_controle_pncp_ata"] for r in collector.store["atas"]} == {"A-1", "A-2"}
+
+
+def test_erro_inesperado_no_worker_sobe_em_vez_de_travar(collector, monkeypatch):
+    def fetch_pages(client, d, start_page):
+        raise ValueError("bug")
+        yield  # pragma: no cover
+
+    with pytest.raises(ValueError, match="bug"):
+        run_pages(collector, monkeypatch, [date(2026, 9, 1), date(2026, 9, 2)], fetch_pages)
+
+
+def test_fila_limitada_segura_quem_baixa(collector, monkeypatch):
+    """Memoria: com a gravacao lenta, os workers esperam em vez de acumular o dia."""
+    import time
+
+    from pncp_collector import pipeline
+
+    produced = []
+
+    def fetch_pages(client, d, start_page):
+        for page in range(1, 51):
+            produced.append(page)
+            yield page, 50, [ata_payload(f"A-{d.day}-{page}")]
+
+    in_flight = []
+    original = pipeline.upsert
+
+    def slow_upsert(session, model, rows):
+        in_flight.append(len(produced) - len(in_flight) - 1)
+        time.sleep(0.002)
+        return original(session, model, rows)
+
+    monkeypatch.setattr(pipeline, "upsert", slow_upsert)
+    stats = run_pages(collector, monkeypatch, [date(2026, 9, 1)], fetch_pages, concurrency=1)
+
+    assert stats.kept == 50
+    # fila de 2 + a pagina em maos do worker: nunca muito a frente da gravacao
+    assert max(in_flight) <= 4

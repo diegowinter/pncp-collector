@@ -374,3 +374,35 @@ class CollectionRun(Base):
     window_start: Mapped[date | None] = mapped_column(Date)
     window_end: Mapped[date | None] = mapped_column(Date)
     stats: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class CollectionDay(Base):
+    """Dia da fase 1 ja gravado por inteiro: a proxima execucao com a mesma
+    referencia pula esse dia. Dia com falha nao entra, e fica para a retomada."""
+
+    __tablename__ = "collection_days"
+
+    dataset: Mapped[str] = mapped_column(String(20), primary_key=True)
+    # Data de referencia da varredura (o "hoje" que define a janela).
+    reference: Mapped[date] = mapped_column(Date, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    records: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    finished_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class CollectionDayProgress(Base):
+    """Dia da fase 1 em andamento: quantas paginas ja foram gravadas. Some quando
+    o dia vai para collection_days. Uma retomada continua da pagina seguinte."""
+
+    __tablename__ = "collection_day_progress"
+
+    dataset: Mapped[str] = mapped_column(String(20), primary_key=True)
+    reference: Mapped[date] = mapped_column(Date, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    pages_done: Mapped[int] = mapped_column(Integer)
+    total_pages: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

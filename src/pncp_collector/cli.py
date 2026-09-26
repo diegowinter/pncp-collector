@@ -22,8 +22,26 @@ from .db import (
 from .detail import STEPS, Detailer, render_detail_summary
 from .pipeline import Collector, render_summary
 
+REFERENCE_HELP = (
+    "Data de referencia (yyyy-MM-dd). Padrao: retoma a ultima varredura incompleta; "
+    "se nao houver, hoje."
+)
+
 app = typer.Typer(help="Coletor de atas e contratos do PNCP.", no_args_is_help=True)
 console = Console()
+
+
+def _reference(reference: str | None, collector: Collector, datasets: list[str]) -> date:
+    if reference:
+        return date.fromisoformat(reference)
+    pending = collector.pending_reference(datasets)
+    if pending is not None:
+        console.print(
+            f"[yellow]Varredura incompleta com referencia {pending}: retomando. "
+            "Use --reference para comecar outra.[/yellow]"
+        )
+        return pending
+    return date.today()
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -59,14 +77,14 @@ def reset_db(
 def atas(
     reference: Annotated[
         str | None,
-        typer.Option("--reference", help="Data de referencia (yyyy-MM-dd). Padrao: hoje."),
+        typer.Option("--reference", help=REFERENCE_HELP),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Coleta atas de registro de precos (janela por vigencia)."""
     _setup_logging(verbose)
-    today = date.fromisoformat(reference) if reference else date.today()
     collector = Collector(settings, console)
+    today = _reference(reference, collector, ["atas"])
     render_summary(console, "atas", collector.collect_atas(today))
 
 
@@ -74,14 +92,14 @@ def atas(
 def contratos(
     reference: Annotated[
         str | None,
-        typer.Option("--reference", help="Data de referencia (yyyy-MM-dd). Padrao: hoje."),
+        typer.Option("--reference", help=REFERENCE_HELP),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Coleta contratos (janela por publicacao)."""
     _setup_logging(verbose)
-    today = date.fromisoformat(reference) if reference else date.today()
     collector = Collector(settings, console)
+    today = _reference(reference, collector, ["contratos"])
     render_summary(console, "contratos", collector.collect_contratos(today))
 
 
@@ -168,7 +186,7 @@ def status() -> None:
 def all(
     reference: Annotated[
         str | None,
-        typer.Option("--reference", help="Data de referencia (yyyy-MM-dd). Padrao: hoje."),
+        typer.Option("--reference", help=REFERENCE_HELP),
     ] = None,
     skip_detail: Annotated[
         bool, typer.Option("--skip-detail", help="So a fase 1 (atas e contratos).")
@@ -177,8 +195,8 @@ def all(
 ) -> None:
     """Coleta atas, depois contratos (a ordem importa para o dedup) e detalha."""
     _setup_logging(verbose)
-    today = date.fromisoformat(reference) if reference else date.today()
     collector = Collector(settings, console)
+    today = _reference(reference, collector, ["atas", "contratos"])
     render_summary(console, "atas", collector.collect_atas(today))
     render_summary(console, "contratos", collector.collect_contratos(today))
     if not skip_detail:

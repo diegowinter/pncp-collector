@@ -15,11 +15,13 @@ CONTRATO = parse_contrato_key("07954480000179-2-031999/2026")
 
 def make_client(handler, **overrides):
     config = Settings(
-        database_url="postgresql+psycopg://x/y",
-        request_delay=0.0,
-        max_retries=3,
-        detail_page_size=10,
-        **overrides,
+        **{
+            "database_url": "postgresql+psycopg://x/y",
+            "request_delay": 0.0,
+            "max_retries": 3,
+            "detail_page_size": 10,
+            **overrides,
+        }
     )
     instance = PNCPClient(config)
     instance._client = httpx.Client(
@@ -32,6 +34,7 @@ def make_client(handler, **overrides):
 def no_sleep(monkeypatch):
     calls = []
     monkeypatch.setattr(client_module.time, "sleep", lambda s: calls.append(s))
+    monkeypatch.setattr(client_module.PNCPClient, "_pause", lambda self, s: calls.append(s))
     return calls
 
 
@@ -112,6 +115,30 @@ def test_429_ate_esgotar_vira_fetch_error_com_status():
         c.get_itens(COMPRA)
     assert not isinstance(info.value, DetailNotFound)
     assert info.value.status_code == 429
+
+
+
+def test_sem_max_retries_tenta_ate_dar_certo():
+    """Sem PNCP_MAX_RETRIES o retry nao tem teto: 50 falhas seguidas e ainda insiste."""
+    attempts = []
+
+    def handler(request):
+        attempts.append(1)
+        if len(attempts) <= 50:
+            return httpx.Response(503)
+        return httpx.Response(200, json=[{"numeroItem": 1}])
+
+    c = make_client(handler, max_retries=None)
+    assert c.get_itens(COMPRA) == [{"numeroItem": 1}]
+    assert len(attempts) == 51
+
+
+def test_padrao_e_retry_ilimitado(monkeypatch):
+    monkeypatch.delenv("PNCP_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("PNCP_DETAIL_MAX_ATTEMPTS", raising=False)
+    config = Settings(_env_file=None)
+    assert config.max_retries is None
+    assert config.detail_max_attempts is None
 
 
 def test_400_e_terminal_sem_retry():
