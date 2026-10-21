@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 from rich.console import Console
 from rich.progress import (
@@ -23,6 +25,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from rich.table import Table
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .client import CollectionInterrupted, DayFetchError, PNCPClient
@@ -39,6 +42,7 @@ from .db import (
     save_day_progress,
     upsert,
 )
+from .memory import release_heap
 from .filters import (
     ATA_FIELDS,
     CONTRATO_FIELDS,
@@ -53,6 +57,18 @@ from .schemas import normalize_ata, normalize_contrato
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 500
+
+# Tentativas de uma transacao quando a conexao com o banco cai (backoff
+# exponencial ate DB_MAX_BACKOFF segundos entre elas). Os upserts sao
+# idempotentes, entao repetir a transacao inteira e seguro.
+DB_RETRIES = 8
+DB_MAX_BACKOFF = 60.0
+
+# A cada N paginas gravadas, devolve ao sistema o heap que a glibc retem
+# (ver memory.py). Medido: sem isso o RSS sobe ~0,4 MB por pagina.
+TRIM_EVERY_PAGES = 20
+
+T = TypeVar("T")
 
 # (cliente, dia, pagina inicial) -> (pagina, totalPaginas, registros) por pagina
 PageFetch = Callable[[PNCPClient, date, int], Iterator[tuple[int, int, list[dict[str, Any]]]]]
@@ -158,6 +174,41 @@ class Collector:
                     return reference
         return None
 
+    # --- banco: transacoes curtas -----------------------------------------------
+
+    def _transaction(self, what: str, work: Callable[[Session], T]) -> T:
+        """Abre uma sessao, executa `work`, commita e fecha.
+
+        Cada escrita da varredura e uma transacao propria, em vez de uma sessao
+        aberta pela varredura inteira: entre uma pagina e outra o coletor pode
+        passar minutos esperando a API, e uma conexao parada esse tempo todo e
+        derrubada por NAT/firewall sem aviso. Com a sessao curta, cada checkout
+        passa pelo pre-ping do pool e troca a conexao morta por uma nova.
+
+        Se mesmo assim a conexao cair no meio (OperationalError/InterfaceError),
+        a transacao e repetida com backoff. So depois de DB_RETRIES o erro sobe.
+        """
+        for attempt in itertools.count():
+            try:
+                with self.session_factory() as session:
+                    result = work(session)
+                    session.commit()
+                    return result
+            except (OperationalError, InterfaceError) as exc:
+                if attempt + 1 >= DB_RETRIES:
+                    raise
+                wait = min(2**attempt + 1.0, DB_MAX_BACKOFF)
+                logger.warning(
+                    "Banco indisponivel ao gravar %s (%s); tentativa %d de %d em %.0fs",
+                    what,
+                    str(exc.orig or exc).strip().splitlines()[0],
+                    attempt + 2,
+                    DB_RETRIES,
+                    wait,
+                )
+                time.sleep(wait)
+        raise AssertionError("unreachable")
+
     # --- execucao ------------------------------------------------------------
 
     def collect_atas(self, today: date | None = None) -> FilterStats:
@@ -181,8 +232,7 @@ class Collector:
     def collect_contratos(self, today: date | None = None) -> FilterStats:
         today = today or date.today()
 
-        with self.session_factory() as session:
-            ata_keys = load_ata_keys(session)
+        ata_keys = self._transaction("chaves das atas", load_ata_keys)
 
         def fetch(client: PNCPClient, day: date, start_page: int):
             return client.iter_contratos_pages(day, start_page)
@@ -318,18 +368,23 @@ class Collector:
     ) -> FilterStats:
         """Varre `days` com PNCP_LIST_CONCURRENCY dias em paralelo, um dia por thread.
 
-        As threads so baixam: cada pagina entra numa fila limitada e a thread
-        principal, dona da unica sessao com o banco, filtra e grava pagina a
-        pagina. A fila limitada segura a memoria (quem baixa espera se a
-        gravacao atrasar), e cada commit leva junto a ultima pagina gravada do
-        dia, para uma retomada continuar dali.
+        As threads so baixam: cada pagina entra numa fila limitada e so a
+        thread principal toca o banco, filtrando e gravando pagina a pagina. A
+        fila limitada segura a memoria (quem baixa espera se a gravacao
+        atrasar), e cada commit leva junto a ultima pagina gravada do dia, para
+        uma retomada continuar dali. Cada commit e uma transacao curta e
+        propria (ver _transaction): nao ha conexao aberta esperando a API.
         """
         stats = FilterStats()
         buffer: list[dict[str, Any]] = []
 
-        with self.session_factory() as session:
-            done = load_done_days(session, dataset, today)
-            partial = load_partial_days(session, dataset, today)
+        def load_checkpoint(session: Session) -> tuple[set[date], dict[date, int]]:
+            return (
+                load_done_days(session, dataset, today),
+                load_partial_days(session, dataset, today),
+            )
+
+        done, partial = self._transaction("checkpoint", load_checkpoint)
         todo = [day for day in days if day not in done]
         resumed_pages = sum(partial.get(day, 0) for day in todo)
         if len(todo) < len(days) or resumed_pages:
@@ -340,20 +395,19 @@ class Collector:
                 + "[/yellow]"
             )
 
-        with self.session_factory() as session:
+        def start_run(session: Session) -> int:
             run = CollectionRun(
                 dataset=dataset,
                 window_start=days[0] if days else None,
                 window_end=days[-1] if days else None,
             )
             session.add(run)
-            session.commit()
-            run_id = run.id
+            session.flush()
+            return run.id
 
-        with (
-            self.session_factory() as session,
-            make_progress(self.console) as progress,
-        ):
+        run_id = self._transaction("inicio da execucao", start_run)
+
+        with make_progress(self.console) as progress:
             task = progress.add_task(
                 f"Coletando {dataset}",
                 total=len(days),
@@ -377,6 +431,7 @@ class Collector:
                 stop = threading.Event()
                 upcoming = iter(todo)
                 kept_by_day: dict[date, int] = {}
+                pages_saved = 0
                 active = 0
                 pool = ThreadPoolExecutor(max_workers=workers)
 
@@ -412,10 +467,11 @@ class Collector:
                                 stats.failed_days.append(event.day.isoformat())
                                 logger.error("Dia %s ignorado: %s", event.day, event.error)
                             else:
-                                mark_day_done(
-                                    session, dataset, today, event.day, kept_by_day[event.day]
+                                day, kept = event.day, kept_by_day[event.day]
+                                self._transaction(
+                                    f"fim do dia {day}",
+                                    lambda s: mark_day_done(s, dataset, today, day, kept),
                                 )
-                                session.commit()
                             active -= 1
                             progress.update(task, advance=1)
                             show()
@@ -437,13 +493,18 @@ class Collector:
                         kept_by_day[event.day] += stats.kept - kept_before
                         # Checkpoint: os registros da pagina e o "ate aqui" do dia
                         # vao no mesmo commit.
-                        if buffer:
-                            upsert(session, model, buffer)
-                            buffer.clear()
-                        save_day_progress(
-                            session, dataset, today, event.day, event.page, event.total_pages
-                        )
-                        session.commit()
+                        def save_page(session: Session, page: _DayEvent = event) -> None:
+                            if buffer:
+                                upsert(session, model, buffer)
+                            save_day_progress(
+                                session, dataset, today, page.day, page.page, page.total_pages
+                            )
+
+                        self._transaction(f"pagina {event.page} de {event.day}", save_page)
+                        buffer.clear()
+                        pages_saved += 1
+                        if pages_saved % TRIM_EVERY_PAGES == 0:
+                            release_heap()
                         show()
                 except BaseException:
                     # Ctrl+C: as threads param de esperar (retry, fila cheia) e o
@@ -454,12 +515,13 @@ class Collector:
                     raise
                 pool.shutdown()
 
+        def finish_run(session: Session) -> None:
             stored = session.get(CollectionRun, run_id)
             if stored is not None:
                 stored.finished_at = datetime.now(timezone.utc)
                 stored.stats = stats.as_dict()
-                session.commit()
 
+        self._transaction("fim da execucao", finish_run)
         return stats
 
 

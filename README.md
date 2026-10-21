@@ -64,6 +64,19 @@ Uma chamada por dia, com `dataInicial == dataFinal`, paginando de 100 em 100.
   entrega página a página numa fila limitada; só a thread principal, com uma única conexão,
   filtra e grava. Se a gravação atrasa, quem baixa espera, então a memória fica em poucas
   páginas, não em dias inteiros.
+- **Memória:** a cada 20 páginas gravadas (e a cada lote da fase 2) o coletor chama
+  `malloc_trim(0)` da glibc. Sem isso, no Linux, o RSS sobe ~0,4 MB por página até o OOM
+  killer, mesmo com o heap do Python estável: as threads alocam e liberam blocos grandes em
+  arenas diferentes e a glibc não devolve as páginas livres ao kernel. Medido na TV box de
+  1 GB: 90 MB estáveis contra mais de 600 MB. `scripts/memprobe.py` roda a CLI com uma sonda
+  que loga RSS, pymalloc e glibc, para medir de novo se precisar.
+- **Conexão com o banco:** cada commit (página, fim de dia, execução) é uma transação curta
+  e própria; não há sessão aberta durante a varredura inteira. Isso importa com Postgres
+  remoto: a thread principal passa minutos sem tocar o banco enquanto espera a API, e um
+  NAT/firewall derruba conexão ociosa sem avisar (`could not receive data from server:
+  Connection timed out`). O engine ainda liga keepalive TCP (sonda a cada 60 s) e recicla
+  conexões a cada 30 min; se mesmo assim a conexão cair, a transação é repetida com backoff
+  até 8 vezes antes de abortar. Como os upserts são idempotentes, repetir é seguro.
 - **Retomada:** cada commit leva os registros da página e a última página gravada do dia
   (`collection_day_progress`); dia completo vai para `collection_days`. Sem `--reference`,
   `atas`, `contratos` e `all` retomam a última varredura incompleta: pulam os dias feitos e

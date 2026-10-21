@@ -30,6 +30,9 @@ class FakeSession:
     def commit(self):
         pass
 
+    def flush(self):
+        pass
+
     def get(self, model, ident):
         return None
 
@@ -654,3 +657,107 @@ def test_fila_limitada_segura_quem_baixa(collector, monkeypatch):
     assert stats.kept == 50
     # fila de 2 + a pagina em maos do worker: nunca muito a frente da gravacao
     assert max(in_flight) <= 4
+
+
+# --- conexao com o banco caindo no meio ----------------------------------------
+
+
+def _dropped_connection():
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError(
+        "INSERT ...", {}, Exception("could not receive data from server: Connection timed out")
+    )
+
+
+def test_transacao_e_repetida_quando_a_conexao_cai(collector, monkeypatch):
+    from pncp_collector import pipeline
+
+    waits = []
+    monkeypatch.setattr(pipeline.time, "sleep", waits.append)
+    store = collector.store
+    calls = {"n": 0}
+
+    class FlakySession(FakeSession):
+        def commit(self):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise _dropped_connection()
+
+    collector.session_factory = lambda: FlakySession(store)
+
+    result = collector._transaction("teste", lambda s: "ok")
+
+    assert result == "ok"
+    assert calls["n"] == 3
+    assert waits == [2.0, 3.0]  # backoff exponencial entre as tentativas
+
+
+def test_transacao_desiste_depois_do_limite(collector, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from pncp_collector import pipeline
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
+
+    class DeadSession(FakeSession):
+        def commit(self):
+            raise _dropped_connection()
+
+    collector.session_factory = lambda: DeadSession(collector.store)
+
+    with pytest.raises(OperationalError):
+        collector._transaction("teste", lambda s: None)
+
+
+def test_pagina_sobrevive_a_queda_da_conexao(collector, monkeypatch):
+    """A pagina e gravada mesmo que o primeiro commit falhe: upsert e idempotente."""
+    from pncp_collector import pipeline
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
+    store = collector.store
+    failed = {"once": False}
+
+    class FlakySession(FakeSession):
+        def commit(self):
+            if not failed["once"]:
+                failed["once"] = True
+                raise _dropped_connection()
+
+    collector.session_factory = lambda: FlakySession(store)
+    day = date(2026, 9, 1)
+
+    def fetch_pages(client, d, start_page):
+        yield 1, 1, [ata_payload("A-1")]
+
+    stats = run_pages(collector, monkeypatch, [day], fetch_pages, concurrency=1)
+
+    assert stats.kept == 1
+    assert failed["once"]
+    assert ("atas", TODAY, day) in store["done"]
+
+
+# --- memoria ------------------------------------------------------------------
+
+
+def test_heap_e_devolvido_a_cada_n_paginas(collector, monkeypatch):
+    from pncp_collector import pipeline
+
+    calls = []
+    monkeypatch.setattr(pipeline, "release_heap", lambda: calls.append(1))
+    day = date(2026, 9, 1)
+    total = pipeline.TRIM_EVERY_PAGES * 2 + 5
+
+    def fetch_pages(client, d, start_page):
+        for page in range(start_page, total + 1):
+            yield page, total, [ata_payload(f"A-{page}")]
+
+    run_pages(collector, monkeypatch, [day], fetch_pages, concurrency=1)
+
+    assert len(calls) == 2
+
+
+def test_release_heap_nao_quebra_fora_do_linux():
+    from pncp_collector.memory import release_heap
+
+    assert release_heap() in (True, False)

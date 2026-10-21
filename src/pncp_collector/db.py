@@ -29,9 +29,40 @@ from .models import (
 )
 
 
+# Parametros de conexao do psycopg/libpq. Keepalive TCP: A varredura passa minutos sem tocar o
+# banco enquanto espera a API, e um Postgres remoto atras de NAT/firewall/
+# balanceador derruba conexao ociosa sem avisar: o cliente so descobre na
+# proxima escrita, com "could not receive data from server: Connection timed
+# out". Com keepalive o socket e sondado a cada 60 s e declarado morto em
+# ~50 s de silencio, e o mapeamento do NAT nao expira.
+KEEPALIVE_ARGS = {
+    "keepalives": 1,
+    "keepalives_idle": 60,
+    "keepalives_interval": 10,
+    "keepalives_count": 5,
+    "connect_timeout": 30,
+    # Sem prepared statements. O psycopg prepara toda query repetida 5 vezes e
+    # guarda ate 100 delas, com o texto inteiro como chave; os inserts de ate
+    # 500 linhas x ~40 colunas da fase 1 tem ~1 MB de texto cada e mudam de
+    # forma a cada pagina (numero de linhas), entao o cache so gasta memoria
+    # aqui e no servidor, sem reaproveitar nada.
+    "prepare_threshold": None,
+}
+
+# Conexao e devolvida ao pool e recriada depois disto (segundos), antes que um
+# limite de idade do lado do servidor a derrube no meio de uma transacao.
+POOL_RECYCLE_SECONDS = 1800
+
+
 def build_engine(config: Settings | None = None) -> Engine:
     config = config or default_settings
-    return create_engine(config.database_url, pool_pre_ping=True, future=True)
+    return create_engine(
+        config.database_url,
+        pool_pre_ping=True,
+        pool_recycle=POOL_RECYCLE_SECONDS,
+        connect_args=dict(KEEPALIVE_ARGS),
+        future=True,
+    )
 
 
 def build_session_factory(engine: Engine) -> sessionmaker[Session]:
@@ -88,7 +119,7 @@ def load_done_days(session: Session, dataset: str, reference: date) -> set[date]
 def mark_day_done(
     session: Session, dataset: str, reference: date, day: date, records: int
 ) -> None:
-    """Sem commit: quem chama grava junto com os registros do dia."""
+    """Sem commit: quem chama decide a transacao."""
     statement = insert(CollectionDay).values(
         dataset=dataset, reference=reference, day=day, records=records
     )
@@ -118,7 +149,7 @@ def load_partial_days(session: Session, dataset: str, reference: date) -> dict[d
 def save_day_progress(
     session: Session, dataset: str, reference: date, day: date, pages_done: int, total_pages: int
 ) -> None:
-    """Sem commit: vai no mesmo commit dos registros da pagina."""
+    """Sem commit: quem chama grava junto com os registros da pagina."""
     statement = insert(CollectionDayProgress).values(
         dataset=dataset,
         reference=reference,

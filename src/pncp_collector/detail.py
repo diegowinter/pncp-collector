@@ -49,6 +49,7 @@ from .detail_rules import (
     revisit_statuses,
     target_file_types,
 )
+from .memory import release_heap
 from .ids import (
     CompraRef,
     parse_ata_key,
@@ -289,6 +290,7 @@ class Detailer:
         stats.files_stored += repo.upsert_arquivos(arquivos)
         repo.update_documents(tipo, updates)
         repo.commit()
+        release_heap()
 
     def step_a(
         self,
@@ -366,6 +368,7 @@ class Detailer:
                 results_error=None,
             )
         repo.commit()
+        release_heap()
 
     def step_b(
         self, client: Any, repo: DetailRepository, refresh: bool, limit: int | None, stats: DetailStats
@@ -430,6 +433,7 @@ class Detailer:
             results_attempts=compra.results_attempts + 1,
         )
         repo.commit()  # por compra: se cair no meio, a proxima execucao refaz so o que faltou
+        release_heap()
 
     def step_c(
         self, client: Any, repo: DetailRepository, refresh: bool, limit: int | None, stats: DetailStats
