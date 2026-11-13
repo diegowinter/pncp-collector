@@ -181,15 +181,16 @@ def load_ata_keys(session: Session) -> tuple[set[str], set[str]]:
     Servem para descartar o contrato derivado de uma ata ja coletada: o preco
     daquele item ja esta registrado pela ata.
     """
-    ata_ids = {row[0] for row in session.execute(select(Ata.numero_controle_pncp_ata))}
-    compra_ids = {
-        row[0]
-        for row in session.execute(
-            select(Ata.numero_controle_pncp_compra).where(
-                Ata.numero_controle_pncp_compra.is_not(None)
-            )
+    # .scalars() evita montar um Row por linha: com meio milhao de atas isso
+    # pesa na caixa ARM. DISTINCT no banco: muitas atas apontam para a mesma compra.
+    ata_ids = set(session.scalars(select(Ata.numero_controle_pncp_ata)))
+    compra_ids = set(
+        session.scalars(
+            select(Ata.numero_controle_pncp_compra)
+            .where(Ata.numero_controle_pncp_compra.is_not(None))
+            .distinct()
         )
-    }
+    )
     return ata_ids, compra_ids
 
 

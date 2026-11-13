@@ -232,7 +232,13 @@ class Collector:
     def collect_contratos(self, today: date | None = None) -> FilterStats:
         today = today or date.today()
 
-        ata_keys = self._transaction("chaves das atas", load_ata_keys)
+        # Sao centenas de milhares de chaves: na caixa ARM leva uns 2 minutos
+        # sem nenhuma barra na tela, o que parece travamento.
+        with self.console.status("Carregando chaves das atas para o dedup de contratos..."):
+            ata_keys = self._transaction("chaves das atas", load_ata_keys)
+        self.console.print(
+            f"[dim]{len(ata_keys[0])} atas e {len(ata_keys[1])} compras com ata carregadas.[/dim]"
+        )
 
         def fetch(client: PNCPClient, day: date, start_page: int):
             return client.iter_contratos_pages(day, start_page)
