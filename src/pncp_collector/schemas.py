@@ -8,15 +8,18 @@ tipo da coluna. Nada de renomear campo do PNCP.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import Boolean, Date, Integer, Numeric
+from sqlalchemy import Boolean, Date, Integer, Numeric, String
 
 from .detail_rules import is_target_file_type
 from .models import Arquivo, Ata, Base, Contrato, Item, ItemResultado
+
+logger = logging.getLogger(__name__)
 
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
@@ -86,7 +89,28 @@ def _coerce(value: Any, column: Any) -> Any:
         return parse_int(value)
     if isinstance(kind, Boolean):
         return None if value is None else bool(value)
+    if isinstance(kind, String) and kind.length and isinstance(value, str):
+        return _fit(value, kind.length, column.name)
     return value
+
+
+def _fit(value: str, length: int, column: str) -> str:
+    """Corta texto maior que a coluna. O payload inteiro segue intacto em `raw`.
+
+    Sem isso um unico campo acima do limite (`processo` com a descricao inteira
+    do pregao, por exemplo) vira DataError no upsert da pagina, derruba a
+    varredura e trava a retomada na mesma pagina.
+    """
+    if len(value) <= length:
+        return value
+    logger.warning(
+        "Campo %s com %d caracteres cortado para %d: %r",
+        column,
+        len(value),
+        length,
+        value[:60],
+    )
+    return value[:length]
 
 
 def normalize(raw: dict[str, Any], model: type[Base]) -> dict[str, Any]:

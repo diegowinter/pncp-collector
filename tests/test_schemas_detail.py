@@ -132,3 +132,22 @@ def test_normalize_arquivo_contrato_respeita_tipos_alvo():
         {**ARQUIVO_CONTRATO, "tipoDocumentoNome": "Outros Documentos"}, "contrato", "K", targets
     )
     assert outro["is_target_type"] is False
+
+
+def test_normalize_corta_texto_maior_que_a_coluna():
+    from pncp_collector.schemas import normalize_contrato
+
+    longo = "000070/2024: " + "X" * 300
+    row = normalize_contrato(
+        {
+            "numeroControlePNCP": "01612847000190-2-000929/2025",
+            "processo": longo,
+            "objetoContrato": longo,
+            "dataAssinatura": "2025-09-25",
+        }
+    )
+    assert len(row["processo"]) == 120
+    assert row["processo"].startswith("000070/2024: ")
+    # Coluna Text nao tem limite: fica inteira.
+    assert row["objeto_contrato"] == longo
+    assert row["raw"]["processo"] == longo
