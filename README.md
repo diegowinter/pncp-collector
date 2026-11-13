@@ -214,6 +214,10 @@ Fase 2:
   virarem `TEXT`: [docs/MIGRACAO_TEXTO_LIVRE.sql](docs/MIGRACAO_TEXTO_LIVRE.sql)
   (so metadado, roda em segundos). Sem ela um valor acima de 120 caracteres dá
   `DataError` e derruba a varredura na mesma página a cada retomada.
+- Banco criado antes de `ni_fornecedor` virar `TEXT`: fornecedor estrangeiro chega como
+  `ESTRANGEIRO_<NOME>` e era cortado em 30 caracteres. `uv run python
+  scripts/patch_ni_fornecedor.py` aplica [docs/MIGRACAO_NI_FORNECEDOR.sql](docs/MIGRACAO_NI_FORNECEDOR.sql)
+  e refaz o campo a partir de `raw`, sem chamar a API (`--dry-run` só conta as linhas).
 
 ## Configuração
 

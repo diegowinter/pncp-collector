@@ -166,7 +166,9 @@ class Contrato(Base, ControlMixin, DetailMixin):
     objeto_contrato: Mapped[str | None] = mapped_column(Text)
     informacao_complementar: Mapped[str | None] = mapped_column(Text)
 
-    ni_fornecedor: Mapped[str | None] = mapped_column(String(30), index=True)
+    # Fornecedor estrangeiro vem como "ESTRANGEIRO_<NOME>" (texto livre, passa
+    # de 30 chars); CNPJ/CPF cabem, mas o campo nao e so documento.
+    ni_fornecedor: Mapped[str | None] = mapped_column(Text, index=True)
     tipo_pessoa: Mapped[str | None] = mapped_column(String(2))
     nome_razao_social_fornecedor: Mapped[str | None] = mapped_column(Text)
 
@@ -307,7 +309,9 @@ class ItemResultado(Base, StampMixin):
     sequencial_resultado: Mapped[int] = mapped_column(Integer, primary_key=True)
 
     ordem_classificacao_srp: Mapped[int | None] = mapped_column(Integer)
-    ni_fornecedor: Mapped[str | None] = mapped_column(String(30), index=True)
+    # Fornecedor estrangeiro vem como "ESTRANGEIRO_<NOME>" (texto livre, passa
+    # de 30 chars); CNPJ/CPF cabem, mas o campo nao e so documento.
+    ni_fornecedor: Mapped[str | None] = mapped_column(Text, index=True)
     nome_razao_social_fornecedor: Mapped[str | None] = mapped_column(Text)
     tipo_pessoa: Mapped[str | None] = mapped_column(String(2))
     codigo_pais: Mapped[str | None] = mapped_column(String(3))
