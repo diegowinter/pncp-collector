@@ -71,6 +71,16 @@ class ItemsStatus:
     ERRO = "erro"
 
 
+class TriageStatus:
+    """Estado da triagem por objeto (fase 3) de uma compra. Ver triage_rules."""
+
+    PENDENTE = "pendente"
+    POTENCIAL = "potencial"
+    FORA_POR_ORA = "fora_por_ora"
+    INDEFINIDO = "indefinido"
+    ERRO = "erro"
+
+
 class ResultsStatus:
     """Estado da busca de resultados de uma compra (N chamadas; pode parar no meio)."""
 
@@ -228,6 +238,30 @@ class Compra(Base, StampMixin):
     ano: Mapped[int] = mapped_column(Integer)
     sequencial: Mapped[int] = mapped_column(Integer)
     url_pncp: Mapped[str | None] = mapped_column(Text)
+
+    # Preenchimento parcial pela capa (fase 3): so o objeto, copiado da ata ou
+    # do contrato que trouxe a compra, e usado na triagem. Os demais campos da
+    # capa nao sao copiados: podem divergir entre documentos da mesma compra.
+    objeto: Mapped[str | None] = mapped_column(Text)
+    objeto_source: Mapped[str | None] = mapped_column(String(10))  # ata | contrato
+
+    # Fase 3 (triagem por objeto). Ver triage_rules.
+    triage_status: Mapped[str] = mapped_column(
+        String(20),
+        default=TriageStatus.PENDENTE,
+        server_default=TriageStatus.PENDENTE,
+        index=True,
+    )
+    triage_clarity: Mapped[str | None] = mapped_column(String(20))
+    triage_potential: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    # {grupo: probabilidade}; a lista de grupos sugeridos sai daqui por limiar.
+    triage_groups: Mapped[dict | None] = mapped_column(JSONB)
+    triage_model: Mapped[str | None] = mapped_column(Text)
+    triage_error: Mapped[str | None] = mapped_column(Text)
+    triage_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    triaged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Resposta crua do modelo (answers + usage): permite reclassificar sem nova chamada.
+    triage_raw: Mapped[dict | None] = mapped_column(JSONB)
 
     items_status: Mapped[str] = mapped_column(
         String(30),

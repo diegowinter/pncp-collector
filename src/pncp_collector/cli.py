@@ -20,7 +20,9 @@ from .db import (
     drop_schema,
 )
 from .detail import STEPS, Detailer, render_detail_summary
+from .models import TriageStatus
 from .pipeline import Collector, render_summary
+from .triage import Triager, render_triage_summary
 
 REFERENCE_HELP = (
     "Data de referencia (yyyy-MM-dd). Padrao: retoma a ultima varredura incompleta; "
@@ -129,6 +131,14 @@ def detalhar(
         str | None,
         typer.Option("--only-step", help="Executa so os passos indicados (ex.: A, BC, D)."),
     ] = None,
+    triagem: Annotated[
+        str | None,
+        typer.Option(
+            "--triagem",
+            help="So capas cuja compra esta nesses triage_status (ex.: potencial ou "
+            "potencial,indefinido). Padrao: todas, como antes da fase 3.",
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Fase 2: arquivos, itens e resultados das capas ja persistidas."""
@@ -141,6 +151,7 @@ def detalhar(
         console.print(f"[red]--only-step aceita so letras de {STEPS}.[/red]")
         raise typer.Exit(code=2)
     statuses = [part.strip() for part in status.split(",") if part.strip()] if status else None
+    triage_statuses = _parse_triage_statuses(triagem)
     detailer = Detailer(settings, console)
     stats = detailer.run(
         tipo=tipo,
@@ -149,8 +160,66 @@ def detalhar(
         refresh=refresh,
         revisit_sem_arquivo=revisit_sem_arquivo,
         steps=steps,
+        triage_statuses=triage_statuses,
     )
     render_detail_summary(console, stats)
+
+
+TRIAGE_STATUSES = {
+    TriageStatus.PENDENTE,
+    TriageStatus.POTENCIAL,
+    TriageStatus.FORA_POR_ORA,
+    TriageStatus.INDEFINIDO,
+    TriageStatus.ERRO,
+}
+
+
+def _parse_triage_statuses(value: str | None) -> list[str] | None:
+    if not value:
+        return None
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    invalid = [part for part in parts if part not in TRIAGE_STATUSES]
+    if invalid:
+        console.print(
+            f"[red]triage_status invalido: {', '.join(invalid)}. "
+            f"Use {', '.join(sorted(TRIAGE_STATUSES))}.[/red]"
+        )
+        raise typer.Exit(code=2)
+    return parts
+
+
+@app.command()
+def triar(
+    status: Annotated[
+        str | None,
+        typer.Option(
+            "--status",
+            help="triage_status a (re)triar, separados por virgula. Padrao: pendente,erro. "
+            "Use fora_por_ora,indefinido,potencial para reclassificar com outro modelo.",
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Maximo de compras nesta execucao.")
+    ] = None,
+    no_seed: Annotated[
+        bool, typer.Option("--no-seed", help="Nao cria compras a partir das capas antes.")
+    ] = False,
+    only_seed: Annotated[
+        bool, typer.Option("--only-seed", help="So cria as compras; nao chama o modelo.")
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Fase 3: triagem das compras pelo objeto da capa (modelo de decisoes)."""
+    _setup_logging(verbose)
+    if not only_seed and not settings.openrouter_api_key:
+        console.print("[red]Defina PNCP_OPENROUTER_API_KEY (.env) para chamar o modelo.[/red]")
+        raise typer.Exit(code=2)
+    statuses = _parse_triage_statuses(status)
+    triager = Triager(settings, console)
+    stats = triager.run(
+        statuses=statuses, limit=limit, seed=not no_seed, triage=not only_seed
+    )
+    render_triage_summary(console, stats, settings)
 
 
 @app.command()
@@ -160,6 +229,7 @@ def status() -> None:
         repo = DetailRepository(session)
         documents = repo.count_documents_by_status()
         compras = repo.count_compras_by_status()
+        triage = repo.count_compras_by_triage()
 
     table = Table(title="Documentos por detail_status")
     table.add_column("Status")
@@ -181,6 +251,13 @@ def status() -> None:
         table.add_row(key, str(compras["items"].get(key, 0)), str(compras["results"].get(key, 0)))
     console.print(table)
 
+    table = Table(title="Compras por triage_status (fase 3)")
+    table.add_column("Status")
+    table.add_column("Compras", justify="right")
+    for key in sorted(triage):
+        table.add_row(key, str(triage[key]))
+    console.print(table)
+
 
 @app.command()
 def all(
@@ -193,7 +270,10 @@ def all(
     ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Coleta atas, depois contratos (a ordem importa para o dedup) e detalha."""
+    """Coleta atas, depois contratos (a ordem importa para o dedup) e detalha.
+
+    Nao tria: a fase 3 e `triar`, e o `detalhar` recortado e `detalhar --triagem potencial`.
+    """
     _setup_logging(verbose)
     collector = Collector(settings, console)
     today = _reference(reference, collector, ["atas", "contratos"])

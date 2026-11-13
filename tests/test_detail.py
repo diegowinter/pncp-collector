@@ -163,11 +163,17 @@ class MemoryRepository:
             detailed_at=d["detailed_at"],
         )
 
-    def select_documents(self, tipo, statuses, *, max_attempts, limit=None, cnpj=None):
+    def select_documents(
+        self, tipo, statuses, *, max_attempts, limit=None, cnpj=None, triage_statuses=None
+    ):
         rows = []
         for id, d in self.docs[tipo].items():
             if d["detail_status"] not in statuses:
                 continue
+            if triage_statuses:
+                compra = self.compras.get(d["numero_controle_pncp_compra"])
+                if compra is None or compra.get("triage_status") not in triage_statuses:
+                    continue
             if d["detail_status"] == DetailStatus.PENDENTE and d["compra_key"] and d["detailed_at"]:
                 continue
             if d["detail_status"] == DetailStatus.ERRO and max_attempts is not None and d["detail_attempts"] >= max_attempts:
@@ -568,3 +574,36 @@ def test_sem_max_attempts_erro_e_revisitado_sempre(world):
 
     assert repo.docs["ata"][ata_id(9)]["detail_attempts"] == 6
     assert client.count("arquivos_ata") == 6
+
+
+# --- fase 3: recorte do passo A por triage_status ---------------------------------------
+
+
+def test_detalhar_com_triagem_so_pega_capas_de_compra_potencial(world):
+    detailer, repo, client = world
+    repo.add_ata(ata_id(1))
+    repo.add_ata(ata_id(2))
+    repo.add_ata(ata_id(3))  # compra ainda sem linha em compras: fora do recorte
+    repo.compras[compra_key(1)] = {"items_status": ItemsStatus.PENDENTE, "triage_status": "potencial"}
+    repo.compras[compra_key(2)] = {"items_status": ItemsStatus.PENDENTE, "triage_status": "fora_por_ora"}
+    for n in (1, 2, 3):
+        client.arquivos[ata_id(n)] = [ARQ_OUTROS]
+
+    detailer.run(steps="A", triage_statuses=["potencial"])
+
+    assert client.count("arquivos_ata") == 1
+    assert repo.docs["ata"][ata_id(1)]["detailed_at"] is not None
+    assert repo.docs["ata"][ata_id(2)]["detailed_at"] is None
+    assert repo.docs["ata"][ata_id(3)]["detailed_at"] is None
+
+
+def test_detalhar_sem_triagem_mantem_comportamento_antigo(world):
+    detailer, repo, client = world
+    repo.add_ata(ata_id(1))
+    repo.add_ata(ata_id(2))
+    client.arquivos[ata_id(1)] = [ARQ_OUTROS]
+    client.arquivos[ata_id(2)] = [ARQ_OUTROS]
+
+    detailer.run(steps="A")
+
+    assert client.count("arquivos_ata") == 2

@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, settings as default_settings
+from .ids import parse_compra_key, url_publica_compra
 from .models import (
     Arquivo,
     Ata,
@@ -26,6 +27,7 @@ from .models import (
     ItemResultado,
     ItemsStatus,
     ResultsStatus,
+    TriageStatus,
 )
 
 
@@ -223,6 +225,13 @@ class CompraRow:
     results_attempts: int
 
 
+@dataclass
+class TriageRow:
+    compra_key: str
+    objeto: str
+    triage_attempts: int
+
+
 def _doc_row(tipo: str, obj: Ata | Contrato) -> DocumentRow:
     return DocumentRow(
         tipo=tipo,
@@ -281,15 +290,30 @@ class DetailRepository:
         max_attempts: int | None,
         limit: int | None = None,
         cnpj: str | None = None,
+        triage_statuses: Sequence[str] | None = None,
     ) -> list[DocumentRow]:
         """Capas a passar pelo passo A, mais recentes primeiro.
 
         Uma capa pendente que ja passou pelo passo A (compra_key e detailed_at
         preenchidos) esta esperando a compra fechar, nao o passo A: fica de fora.
         Em erro, so ate max_attempts (None = sem limite).
+
+        Com `triage_statuses`, so capas cuja compra (pelo numeroControlePNCPCompra
+        da capa) esta nesses estados da fase 3. Capa sem compra na capa (contrato
+        que depende do fallback) fica de fora do recorte.
         """
         model = DOCUMENT_MODELS[tipo]
         query = select(model).where(model.detail_status.in_(list(statuses)))
+        if triage_statuses:
+            triaged = (
+                select(Compra.compra_key)
+                .where(
+                    Compra.compra_key == model.numero_controle_pncp_compra,
+                    Compra.triage_status.in_(list(triage_statuses)),
+                )
+                .exists()
+            )
+            query = query.where(triaged)
         query = query.where(
             ~(
                 (model.detail_status == DetailStatus.PENDENTE)
@@ -439,6 +463,114 @@ class DetailRepository:
             "items": {status: count for status, count in items},
             "results": {status: count for status, count in results},
         }
+
+    # --- fase 3 (triagem por objeto) --------------------------------------------------
+
+    SEED_SOURCES = (
+        # (tipo, coluna da chave da compra, coluna do objeto). Ata primeiro: o
+        # objeto da ata vence quando a compra tambem tem contrato.
+        ("ata", Ata.numero_controle_pncp_compra, Ata.objeto_contratacao),
+        ("contrato", Contrato.numero_controle_pncp_compra, Contrato.objeto_contrato),
+    )
+
+    def seed_compras_from_capas(self, batch_size: int = 1000) -> int:
+        """Cria a compra a partir da capa, com preenchimento parcial: so a chave,
+        o que se deriva dela e o objeto. Compra ja existente (da fase 2) ganha o
+        objeto se ainda nao tiver; nada mais e tocado. Devolve quantas compras
+        foram criadas ou receberam objeto, contado pelo banco: o rowcount de um
+        INSERT em lotes (insertmanyvalues) nao e confiavel."""
+        before = self._count_with_objeto()
+        for source, key_column, objeto_column in self.SEED_SOURCES:
+            query = (
+                select(key_column, func.min(objeto_column))
+                .where(key_column.is_not(None), objeto_column.is_not(None))
+                .group_by(key_column)
+            )
+            batch: list[dict[str, Any]] = []
+            for key, objeto in self.session.execute(query).yield_per(batch_size):
+                ref = parse_compra_key(key)
+                if ref is None:
+                    continue
+                batch.append(
+                    {
+                        "compra_key": ref.key,
+                        "cnpj": ref.cnpj,
+                        "ano": ref.ano,
+                        "sequencial": ref.sequencial,
+                        "url_pncp": url_publica_compra(ref),
+                        "objeto": objeto,
+                        "objeto_source": source,
+                    }
+                )
+                if len(batch) >= batch_size:
+                    self._seed_batch(batch)
+                    batch = []
+            self._seed_batch(batch)
+            self.session.commit()
+        return self._count_with_objeto() - before
+
+    def _count_with_objeto(self) -> int:
+        return (
+            self.session.scalar(
+                select(func.count()).select_from(Compra).where(Compra.objeto.is_not(None))
+            )
+            or 0
+        )
+
+    def _seed_batch(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        statement = insert(Compra).values(rows)
+        statement = statement.on_conflict_do_update(
+            index_elements=["compra_key"],
+            set_={
+                "objeto": func.coalesce(Compra.objeto, statement.excluded.objeto),
+                "objeto_source": func.coalesce(
+                    Compra.objeto_source, statement.excluded.objeto_source
+                ),
+            },
+            where=Compra.objeto.is_(None),
+        )
+        self.session.execute(statement)
+
+    def select_compras_for_triage(
+        self,
+        statuses: Sequence[str],
+        *,
+        max_attempts: int | None,
+        limit: int | None = None,
+    ) -> list["TriageRow"]:
+        query = select(Compra.compra_key, Compra.objeto, Compra.triage_attempts).where(
+            Compra.triage_status.in_(list(statuses)), Compra.objeto.is_not(None)
+        )
+        if max_attempts is not None:
+            query = query.where(
+                ~(
+                    (Compra.triage_status == TriageStatus.ERRO)
+                    & (Compra.triage_attempts >= max_attempts)
+                )
+            )
+        query = query.order_by(Compra.ano.desc(), Compra.compra_key)
+        if limit:
+            query = query.limit(limit)
+        return [
+            TriageRow(compra_key=key, objeto=objeto, triage_attempts=attempts or 0)
+            for key, objeto, attempts in self.session.execute(query)
+        ]
+
+    def update_triage(self, rows: Sequence[dict[str, Any]]) -> None:
+        """Cada linha traz compra_key mais as colunas triage_* a gravar."""
+        for row in rows:
+            values = {k: v for k, v in row.items() if k != "compra_key"}
+            self.session.execute(
+                update(Compra).where(Compra.compra_key == row["compra_key"]).values(**values)
+            )
+
+    def count_compras_by_triage(self) -> dict[str, int]:
+        rows = self.session.execute(
+            select(Compra.triage_status, func.count()).group_by(Compra.triage_status)
+        )
+        return {status: count for status, count in rows}
 
     # --- itens, resultados, arquivos ----------------------------------------------
 

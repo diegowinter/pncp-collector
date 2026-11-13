@@ -20,6 +20,8 @@ uv run pncp-collector init-db
 ```bash
 uv run pncp-collector atas          # fase 1: varredura por vigência
 uv run pncp-collector contratos     # fase 1: varredura por publicação
+uv run pncp-collector triar         # fase 3: triagem das compras pelo objeto (modelo de decisões)
+uv run pncp-collector detalhar --triagem potencial   # fase 2 só nas compras que a triagem apontou
 uv run pncp-collector detalhar      # fase 2: arquivos, itens e resultados das capas no banco
 uv run pncp-collector status        # quanto falta, por status
 uv run pncp-collector all           # atas → contratos → detalhar (a ordem importa)
@@ -39,6 +41,15 @@ Opções de `detalhar`:
 | `--refresh` | Revisita também documentos `ok` e refaz itens e resultados. |
 | `--revisit-sem-arquivo` | Revisita documentos `sem_arquivo`. |
 | `--only-step A\|B\|C\|D` | Executa só os passos indicados (`BC`, `D`...). |
+| `--triagem potencial[,indefinido]` | Só capas cuja compra está nesses `triage_status` (fase 3). Sem a opção, todas, como antes. |
+
+Opções de `triar`:
+
+| Opção | Efeito |
+|---|---|
+| `--status pendente,erro,...` | Quais `triage_status` (re)triar (padrão `pendente,erro`). |
+| `--limit N` | No máximo N compras nesta execução. |
+| `--no-seed` / `--only-seed` | Pula, ou faz só, a criação das compras a partir das capas. |
 
 ## Regra de coleta
 
@@ -167,6 +178,51 @@ homologados com resultado. Para a base medida (891 capas, 752 compras): ~6.450 c
 [docs/API_DETALHE.md](docs/API_DETALHE.md); queries de leitura em
 [docs/CONSULTAS.md](docs/CONSULTAS.md).
 
+## Triagem por objeto (fase 3)
+
+O lake tem centenas de milhares de atas, a maioria de saúde, merenda e obras. Detalhar tudo
+(fase 2) é caro, então antes se decide **pela capa** quais compras valem a pena. A unidade é a
+compra: as N atas de um mesmo pregão trazem o mesmo objeto, e a fase 2 já é por compra.
+
+Dois passos, ambos retomáveis:
+
+| Passo | O que faz |
+|---|---|
+| semear | Cria a linha em `compras` a partir das capas, com **preenchimento parcial**: só a chave (e o que se deriva dela) e o `objeto`, copiado da ata ou do contrato (`objeto_source`). Nenhum outro campo da capa é copiado, porque podem divergir entre documentos da mesma compra. Compra que já existia (da fase 2) só ganha o objeto. Sem API. |
+| triar | Uma chamada por compra pendente ao **endpoint de decisões** do OpenRouter (`POST /api/alpha/decisions`, modelo `typesafe/jev-1.14`). Não é chat: vão perguntas tipadas e voltam probabilidades. |
+
+Perguntas feitas (definidas em `triage_rules.py`, mesmas regras de "entra / não entra" do
+classificador de itens do pesquisa-de-precos-pncp):
+
+- `clareza` (`claro` / `generico` / `remete_ao_edital`): o objeto nomeia o que é fornecido?
+- `potencial` (probabilidade): pode haver item de interesse para a pesquisa de preços de
+  segurança pública? Pergunta pela **possibilidade**: objeto amplo conta como possível.
+- um `noul` por grupo: `armamento`, `vestuario_operacional`, `viaturas`, `ti_comunicacao`,
+  `drone_bicicleta`, `servicos`. Cada grupo agrupa categorias de item (ex.: `armamento` =
+  `arma_fogo`, `arma_nao_letal`, `municao`, `protecao_balistica`).
+
+Decisão (`triage_status`), em ordem:
+
+1. `potencial` ≥ `PNCP_TRIAGE_POTENTIAL_THRESHOLD` (0,5) → **`potencial`**, mesmo com objeto
+   genérico: a fase 2 vai dizer o que há dentro.
+2. objeto `generico` ou `remete_ao_edital` → **`indefinido`**: não dá para decidir pela capa.
+   Fica na fila para classificar pelos PDFs (OCR dos arquivos; a fazer).
+3. senão → **`fora_por_ora`**.
+
+Nada é descartado. As probabilidades (`triage_potential`, `triage_groups`) e a resposta crua
+(`triage_raw`) ficam na linha, então dá para reclassificar mudando o limiar sem nova chamada,
+ou retriar com outro modelo (`triar --status fora_por_ora,indefinido,potencial`). Contrato
+derivado de ata herda a decisão: ela é da compra, não do documento.
+
+O critério da capa é **recall**: "equipamentos de informática" pode ser notebook ou toner, e
+só o item diz. Por isso em dúvida a compra vai para `potencial` e o corte fino continua no
+classificador de itens.
+
+Medido em 2026-11-13 (amostra de 200 compras + 40 pares ata/contrato): ~US$ 0,000045 e 0,6 s
+por compra com 8 chamadas em paralelo; o lote de 125 mil compras vigentes sai por ~US$ 6 em
+~3 h. `PNCP_TRIAGE_MAX_COST_USD` põe um teto por execução. A validação humana está em
+[docs/validacao/](docs/validacao/) (planilha rotulada à mão + previsões do modelo à parte).
+
 ## Banco
 
 **Convenção de nomes:** as colunas que vêm do PNCP mantêm o nome da API, apenas
@@ -210,6 +266,16 @@ Fase 2:
   não é apagado daqui; fica com `updated_at` antigo.
 - Banco já existente: [docs/MIGRACAO_DETALHE.sql](docs/MIGRACAO_DETALHE.sql) acrescenta as
   colunas nas capas (as tabelas novas o `init-db` cria).
+
+Fase 3:
+
+- `compras` ganha `objeto` e `objeto_source` (preenchimento parcial pela capa) e o estado da
+  triagem: `triage_status`, `triage_clarity`, `triage_potential`, `triage_groups`
+  (`{grupo: probabilidade}`), `triage_model`, `triage_error`, `triage_attempts`, `triaged_at`,
+  `triage_raw`. Os **valores** de classificação ficam em português (`potencial`, `armamento`...);
+  só os nomes das colunas são em inglês, como os demais campos de controle.
+- `collection_runs` recebe `dataset = 'triagem'` com chamadas, custo em dólares e tokens.
+- Banco já existente: [docs/MIGRACAO_TRIAGEM.sql](docs/MIGRACAO_TRIAGEM.sql) (idempotente).
 - Banco criado antes de `processo`/`numero_contrato_empenho`/`numero_ata_registro_preco`
   virarem `TEXT`: [docs/MIGRACAO_TEXTO_LIVRE.sql](docs/MIGRACAO_TEXTO_LIVRE.sql)
   (so metadado, roda em segundos). Sem ela um valor acima de 120 caracteres dá
@@ -233,6 +299,11 @@ de requisições) e `LIST_CONCURRENCY` (1–16 dias em paralelo, padrão 1).
 
 Fase 2: `DETAIL_CONCURRENCY` (1–8 threads), `DETAIL_REQUEST_DELAY` (padrão = `REQUEST_DELAY`),
 `DETAIL_MAX_ATTEMPTS`, `DETAIL_PAGE_SIZE` e `TARGET_FILE_TYPES_ATA` / `TARGET_FILE_TYPES_CONTRATO`.
+
+Fase 3: `OPENROUTER_API_KEY` (obrigatória para `triar`; nunca no repositório),
+`TRIAGE_MODEL` (padrão `typesafe/jev-1.14`), `TRIAGE_CONCURRENCY` (1–32, padrão 8),
+`TRIAGE_POTENTIAL_THRESHOLD` e `TRIAGE_GROUP_THRESHOLD` (padrão 0,5), `TRIAGE_MAX_ATTEMPTS`
+e `TRIAGE_MAX_COST_USD` (teto de gasto por execução; sem limite quando não definidos).
 
 ## Testes
 
@@ -258,6 +329,9 @@ não foi medido (ver docs/API_DETALHE.md, § 1.6, que mediu só a de detalhe).
 
 Fase 2 (medido em 2026-09-15 para um órgão com 891 capas): ~6.450 chamadas a ~8 s cada.
 Ver § Detalhamento e [docs/API_DETALHE.md](docs/API_DETALHE.md).
+
+Fase 3: ~US$ 0,000045 por compra no `typesafe/jev-1.14` (medido em 2026-11-13); ver
+§ Triagem por objeto. É a fase mais barata e a que decide quanto a fase 2 vai custar.
 
 ## Convenção de commits
 

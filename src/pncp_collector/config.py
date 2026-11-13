@@ -73,6 +73,23 @@ class Settings(BaseSettings):
             return self.request_delay
         return self.detail_request_delay
 
+    # Fase 3 (triagem por objeto). Endpoint de decisoes do OpenRouter; a chave
+    # NUNCA vai no codigo nem no repositorio.
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://openrouter.ai"
+    triage_model: str = "typesafe/jev-1.14"
+    # Chamadas em paralelo. O endpoint e rapido (~0,6 s) e sem throttling
+    # observado ate 8.
+    triage_concurrency: int = Field(default=8, ge=1, le=32)
+    # Probabilidade minima de "potencial" para a compra ir para a fase 2.
+    triage_potential_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Probabilidade minima para um grupo entrar na lista de sugeridos.
+    triage_group_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Compra em erro deixa de ser revisitada apos N tentativas; None = sempre.
+    triage_max_attempts: int | None = Field(default=None, ge=1)
+    # Teto de gasto por execucao, em dolares; None = sem teto.
+    triage_max_cost_usd: float | None = Field(default=None, ge=0.0)
+
     # Recortes opcionais da consulta.
     cnpj: str | None = None
     codigo_unidade_administrativa: str | None = None

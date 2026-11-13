@@ -145,11 +145,16 @@ class Detailer:
         refresh: bool = False,
         revisit_sem_arquivo: bool = False,
         steps: str = STEPS,
+        triage_statuses: Sequence[str] | None = None,
     ) -> DetailStats:
+        """`triage_statuses` restringe o passo A as capas cuja compra esta nesses
+        estados da fase 3 (ex.: so `potencial`). Os passos B e C ja so tocam
+        compras com documento pendente, entao o recorte se propaga sozinho."""
         tipos = [ATA, CONTRATO] if tipo == "all" else [tipo]
         statuses = tuple(statuses or revisit_statuses(refresh, revisit_sem_arquivo))
         steps = steps.upper()
         stats = DetailStats()
+        self._triage_statuses = tuple(triage_statuses) if triage_statuses else None
 
         with self.repository_factory() as repo:
             run_id = repo.start_run(DATASET)
@@ -308,6 +313,7 @@ class Detailer:
                 max_attempts=self.config.detail_max_attempts,
                 limit=limit,
                 cnpj=self.config.cnpj,
+                triage_statuses=getattr(self, "_triage_statuses", None),
             )
             with make_progress(self.console) as progress:
                 task = progress.add_task(f"A arquivos ({tipo})", total=len(docs), detail="")
