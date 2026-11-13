@@ -105,7 +105,8 @@ class Ata(Base, ControlMixin, DetailMixin):
     numero_controle_pncp_compra: Mapped[str | None] = mapped_column(
         String(80), index=True
     )
-    numero_ata_registro_preco: Mapped[str | None] = mapped_column(String(120))
+    # Texto livre do orgao: nao tem tamanho confiavel.
+    numero_ata_registro_preco: Mapped[str | None] = mapped_column(Text)
     ano_ata: Mapped[int | None] = mapped_column(Integer)
 
     data_assinatura: Mapped[date] = mapped_column(Date, index=True)
@@ -148,10 +149,12 @@ class Contrato(Base, ControlMixin, DetailMixin):
         String(80), index=True
     )
     numero_controle_pncp_ata: Mapped[str | None] = mapped_column(String(80), index=True)
-    numero_contrato_empenho: Mapped[str | None] = mapped_column(String(120))
+    # Texto livre do orgao (o PNCP nao limita): `processo` chega com a descricao
+    # inteira do pregao em alguns orgaos.
+    numero_contrato_empenho: Mapped[str | None] = mapped_column(Text)
     ano_contrato: Mapped[int | None] = mapped_column(Integer)
     sequencial_contrato: Mapped[int | None] = mapped_column(Integer)
-    processo: Mapped[str | None] = mapped_column(String(120))
+    processo: Mapped[str | None] = mapped_column(Text)
 
     data_assinatura: Mapped[date] = mapped_column(Date, index=True)
     data_vigencia_inicio: Mapped[date | None] = mapped_column(Date)

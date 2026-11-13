@@ -210,6 +210,10 @@ Fase 2:
   não é apagado daqui; fica com `updated_at` antigo.
 - Banco já existente: [docs/MIGRACAO_DETALHE.sql](docs/MIGRACAO_DETALHE.sql) acrescenta as
   colunas nas capas (as tabelas novas o `init-db` cria).
+- Banco criado antes de `processo`/`numero_contrato_empenho`/`numero_ata_registro_preco`
+  virarem `TEXT`: [docs/MIGRACAO_TEXTO_LIVRE.sql](docs/MIGRACAO_TEXTO_LIVRE.sql)
+  (so metadado, roda em segundos). Sem ela um valor acima de 120 caracteres dá
+  `DataError` e derruba a varredura na mesma página a cada retomada.
 
 ## Configuração
 

@@ -134,7 +134,7 @@ def test_normalize_arquivo_contrato_respeita_tipos_alvo():
     assert outro["is_target_type"] is False
 
 
-def test_normalize_corta_texto_maior_que_a_coluna():
+def test_normalize_texto_livre_fica_inteiro_e_corta_so_coluna_limitada():
     from pncp_collector.schemas import normalize_contrato
 
     longo = "000070/2024: " + "X" * 300
@@ -142,12 +142,15 @@ def test_normalize_corta_texto_maior_que_a_coluna():
         {
             "numeroControlePNCP": "01612847000190-2-000929/2025",
             "processo": longo,
+            "numeroContratoEmpenho": longo,
             "objetoContrato": longo,
             "dataAssinatura": "2025-09-25",
+            # String(2): lixo acima do limite nao pode derrubar o upsert da pagina.
+            "tipoPessoa": "PJX",
         }
     )
-    assert len(row["processo"]) == 120
-    assert row["processo"].startswith("000070/2024: ")
-    # Coluna Text nao tem limite: fica inteira.
+    assert row["processo"] == longo
+    assert row["numero_contrato_empenho"] == longo
     assert row["objeto_contrato"] == longo
-    assert row["raw"]["processo"] == longo
+    assert row["tipo_pessoa"] == "PJ"
+    assert row["raw"]["tipoPessoa"] == "PJX"
