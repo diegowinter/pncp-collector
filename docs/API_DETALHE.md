@@ -162,6 +162,21 @@ aninhado (vira `reserva_remanescente_codigo`/`_nome` no achatamento).
 /`statusAtivo`. Traz `numeroControlePncpCompra` e `numeroControlePncpAta` (6/6). Inexistente: 404
 `"O contrato/empenho informado não está cadastrado."`.
 
+## 1.5b Endpoint da compra (verificado em 2026-11-14)
+
+O coletor nao consulta a compra em si (nao ha payload "da compra" no fluxo), mas ficou
+registrado para quando precisar:
+
+- `GET /api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}` passou a responder **301** com um JSON
+  avisando que foi movido para `/api/consulta/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}`
+  (a mensagem cita a porta 34569, mas o caminho em `pncp.gov.br` sem porta responde 200).
+- Os endpoints que a fase 2 usa (`/itens`, `/itens/{n}/resultados`, `/atas/{n}/arquivos`,
+  `/contratos/{ano}/{seq}/arquivos` e o fallback `/contratos/{ano}/{seq}`) continuam em
+  `/api/pncp/v1` respondendo 200.
+- `objetoCompra` desse endpoint e **identico** ao `objetoContratacao` da ata (15/15 numa
+  amostra aleatoria), o que confirma que a ata nao tem objeto proprio: o campo e o da
+  contratacao. E isso que permite usar o objeto da capa como objeto da compra na fase 3.
+
 ## 1.6 Ritmo
 
 Com delay de 0,5 s, 114 chamadas sequenciais, todas em `/api/pncp/v1/*`:
