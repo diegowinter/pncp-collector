@@ -118,6 +118,18 @@ with psycopg.connect(destino) as dst:
             cur.execute(f'select count(*) from "{name}"')
             print(f"{name}: {cur.fetchone()[0]} linhas em {time.time() - t0:.0f}s", flush=True)
 
+# COPY traz os ids mas nao avanca as sequencias: sem isto o proximo INSERT em
+# collection_runs tenta o id 1 de novo (UniqueViolation).
+with engine.begin() as c:
+    for t in Base.metadata.sorted_tables:
+        for col in t.columns:
+            if col.autoincrement is True and col.primary_key and col.type.python_type is int:
+                c.execute(text(
+                    f"select setval(pg_get_serial_sequence('{t.name}', '{col.name}'), "
+                    f"coalesce(max({col.name}), 1)) from {t.name}"
+                ))
+                print(f"sequencia de {t.name}.{col.name} ajustada", flush=True)
+
 with engine.begin() as c:
     print("tamanho local:", c.execute(text("select pg_size_pretty(pg_database_size(current_database()))")).scalar())
 print("concluido", flush=True)
