@@ -207,17 +207,28 @@ def triar(
     only_seed: Annotated[
         bool, typer.Option("--only-seed", help="So cria as compras; nao chama o modelo.")
     ] = False,
+    origem: Annotated[
+        str | None,
+        typer.Option(
+            "--origem",
+            help="So compras cujo objeto veio desse tipo de capa: ata ou contrato. "
+            "Padrao: todas. Comece por `ata`: e a fonte principal e custa ~1/3.",
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Fase 3: triagem das compras pelo objeto da capa (modelo de decisoes)."""
     _setup_logging(verbose)
+    if origem not in (None, "ata", "contrato"):
+        console.print("[red]--origem deve ser ata ou contrato.[/red]")
+        raise typer.Exit(code=2)
     if not only_seed and not settings.openrouter_api_key:
         console.print("[red]Defina PNCP_OPENROUTER_API_KEY (.env) para chamar o modelo.[/red]")
         raise typer.Exit(code=2)
     statuses = _parse_triage_statuses(status)
     triager = Triager(settings, console)
     stats = triager.run(
-        statuses=statuses, limit=limit, seed=not no_seed, triage=not only_seed
+        statuses=statuses, limit=limit, seed=not no_seed, triage=not only_seed, source=origem
     )
     render_triage_summary(console, stats, settings)
 

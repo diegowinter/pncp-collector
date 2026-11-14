@@ -113,14 +113,18 @@ class Triager:
         limit: int | None = None,
         seed: bool = True,
         triage: bool = True,
+        source: str | None = None,
     ) -> TriageStats:
+        """`source` ("ata" | "contrato") tria so as compras semeadas a partir desse
+        tipo de capa. A semeadura continua sendo de todas as capas."""
         statuses = tuple(statuses or DEFAULT_STATUSES)
         stats = TriageStats()
+        stats.source = source
         started = time.perf_counter()
 
         with self.repository_factory() as repo:
             run_id = repo.start_run(DATASET)
-            stats.compras_before.update(repo.count_compras_by_triage())
+            stats.compras_before.update(repo.count_compras_by_triage(source))
             if seed:
                 with self.console.status("Semeando compras a partir das capas..."):
                     stats.seeded = repo.seed_compras_from_capas()
@@ -129,12 +133,15 @@ class Triager:
                 )
             if triage:
                 rows = repo.select_compras_for_triage(
-                    statuses, max_attempts=self.config.triage_max_attempts, limit=limit
+                    statuses,
+                    max_attempts=self.config.triage_max_attempts,
+                    limit=limit,
+                    source=source,
                 )
                 if rows:
                     with self.client_factory(self.config) as client:
                         self._triage(client, repo, rows, stats)
-            stats.compras_after.update(repo.count_compras_by_triage())
+            stats.compras_after.update(repo.count_compras_by_triage(source))
             stats.seconds = time.perf_counter() - started
             repo.finish_run(run_id, stats.as_dict())
         return stats
@@ -255,7 +262,8 @@ def render_triage_summary(console: Console, stats: TriageStats, config: Settings
     table.add_row("Tempo", f"{stats.seconds:.0f}s")
     console.print(table)
 
-    status_table = Table(title="Compras por triage_status (antes -> depois)")
+    scope = f" (origem {stats.source})" if stats.source else ""
+    status_table = Table(title=f"Compras por triage_status{scope} (antes -> depois)")
     status_table.add_column("Status")
     status_table.add_column("Antes", justify="right")
     status_table.add_column("Depois", justify="right")

@@ -20,7 +20,7 @@ uv run pncp-collector init-db
 ```bash
 uv run pncp-collector atas          # fase 1: varredura por vigência
 uv run pncp-collector contratos     # fase 1: varredura por publicação
-uv run pncp-collector triar         # fase 3: triagem das compras pelo objeto (modelo de decisões)
+uv run pncp-collector triar --origem ata   # fase 3: triagem pelo objeto (modelo de decisões), só compras de atas
 uv run pncp-collector detalhar --triagem potencial   # fase 2 só nas compras que a triagem apontou
 uv run pncp-collector detalhar      # fase 2: arquivos, itens e resultados das capas no banco
 uv run pncp-collector status        # quanto falta, por status
@@ -50,6 +50,7 @@ Opções de `triar`:
 | `--status pendente,erro,...` | Quais `triage_status` (re)triar (padrão `pendente,erro`). |
 | `--limit N` | No máximo N compras nesta execução. |
 | `--no-seed` / `--only-seed` | Pula, ou faz só, a criação das compras a partir das capas. |
+| `--origem ata\|contrato` | Só compras cujo objeto veio desse tipo de capa. Comece por `ata` (~144 mil compras, ~US$ 11); contratos são o dobro e ainda estão sendo coletados. |
 
 ## Regra de coleta
 

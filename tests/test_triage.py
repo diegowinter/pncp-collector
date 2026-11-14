@@ -201,8 +201,10 @@ class MemoryTriageRepository:
         self.commits = 0
         self.seeded = 0
 
-    def add(self, key, objeto, status=TriageStatus.PENDENTE, attempts=0):
-        self.compras[key] = {"objeto": objeto, "triage_status": status, "triage_attempts": attempts}
+    def add(self, key, objeto, status=TriageStatus.PENDENTE, attempts=0, source="ata"):
+        self.compras[key] = {
+            "objeto": objeto, "triage_status": status, "triage_attempts": attempts, "objeto_source": source
+        }
 
     def commit(self):
         self.commits += 1
@@ -217,16 +219,20 @@ class MemoryTriageRepository:
     def seed_compras_from_capas(self):
         return self.seeded
 
-    def count_compras_by_triage(self):
+    def count_compras_by_triage(self, source=None):
         out = {}
         for c in self.compras.values():
+            if source and c["objeto_source"] != source:
+                continue
             out[c["triage_status"]] = out.get(c["triage_status"], 0) + 1
         return out
 
-    def select_compras_for_triage(self, statuses, *, max_attempts, limit=None):
+    def select_compras_for_triage(self, statuses, *, max_attempts, limit=None, source=None):
         rows = []
         for key, c in self.compras.items():
             if c["triage_status"] not in statuses or c["objeto"] is None:
+                continue
+            if source and c["objeto_source"] != source:
                 continue
             if (
                 max_attempts is not None
@@ -337,3 +343,18 @@ def test_teto_de_custo_para_a_execucao(world):
     stats = triager.run(seed=False)
     assert stats.processed == 3
     assert stats.cost_usd >= 0.00001
+
+
+def test_origem_ata_tria_so_compras_vindas_de_atas(world):
+    triager, repo, client = world
+    repo.add("a1", "notebooks", source="ata")
+    repo.add("c1", "viaturas", source="contrato")
+    client.by_objeto["notebooks"] = answers(potencial=0.9)
+    client.by_objeto["viaturas"] = answers(potencial=0.9)
+
+    stats = triager.run(seed=False, source="ata")
+
+    assert client.calls == ["notebooks"]
+    assert repo.compras["c1"]["triage_status"] == TriageStatus.PENDENTE
+    assert stats.compras_after == {TriageStatus.POTENCIAL: 1}
+    assert repo.runs[0]["stats"]["source"] == "ata"

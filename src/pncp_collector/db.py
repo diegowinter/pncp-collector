@@ -539,10 +539,15 @@ class DetailRepository:
         *,
         max_attempts: int | None,
         limit: int | None = None,
+        source: str | None = None,
     ) -> list["TriageRow"]:
+        """`source` = "ata" ou "contrato" restringe a compras cujo objeto veio desse
+        tipo de capa (compra com ata e contrato conta como "ata": a ata vence na semeadura)."""
         query = select(Compra.compra_key, Compra.objeto, Compra.triage_attempts).where(
             Compra.triage_status.in_(list(statuses)), Compra.objeto.is_not(None)
         )
+        if source:
+            query = query.where(Compra.objeto_source == source)
         if max_attempts is not None:
             query = query.where(
                 ~(
@@ -566,11 +571,11 @@ class DetailRepository:
                 update(Compra).where(Compra.compra_key == row["compra_key"]).values(**values)
             )
 
-    def count_compras_by_triage(self) -> dict[str, int]:
-        rows = self.session.execute(
-            select(Compra.triage_status, func.count()).group_by(Compra.triage_status)
-        )
-        return {status: count for status, count in rows}
+    def count_compras_by_triage(self, source: str | None = None) -> dict[str, int]:
+        query = select(Compra.triage_status, func.count()).group_by(Compra.triage_status)
+        if source:
+            query = query.where(Compra.objeto_source == source)
+        return {status: count for status, count in self.session.execute(query)}
 
     # --- itens, resultados, arquivos ----------------------------------------------
 

@@ -282,9 +282,11 @@ class TriageStats:
     input_tokens: int = 0
     output_tokens: int = 0
     seconds: float = 0.0
+    source: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "source": self.source,
             "compras_before": dict(self.compras_before),
             "compras_after": dict(self.compras_after),
             "seeded": self.seeded,
