@@ -82,7 +82,9 @@ class Settings(BaseSettings):
     # observado ate 8.
     triage_concurrency: int = Field(default=8, ge=1, le=32)
     # Probabilidade minima de "potencial" para a compra ir para a fase 2.
-    triage_potential_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # 0,45 vem da validacao humana de 2026-11-13 (docs/validacao): pega 8 dos 9
+    # "sim" contra 6 com 0,5, e so 2% a mais de compras entram.
+    triage_potential_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     # Probabilidade minima para um grupo entrar na lista de sugeridos.
     triage_group_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     # Compra em erro deixa de ser revisitada apos N tentativas; None = sempre.

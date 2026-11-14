@@ -203,7 +203,7 @@ classificador de itens do pesquisa-de-precos-pncp):
 
 Decisão (`triage_status`), em ordem:
 
-1. `potencial` ≥ `PNCP_TRIAGE_POTENTIAL_THRESHOLD` (0,5) → **`potencial`**, mesmo com objeto
+1. `potencial` ≥ `PNCP_TRIAGE_POTENTIAL_THRESHOLD` (0,45) → **`potencial`**, mesmo com objeto
    genérico: a fase 2 vai dizer o que há dentro.
 2. objeto `generico` ou `remete_ao_edital` → **`indefinido`**: não dá para decidir pela capa.
    Fica na fila para classificar pelos PDFs (OCR dos arquivos; a fazer).
@@ -220,8 +220,13 @@ classificador de itens.
 
 Medido em 2026-11-13 (amostra de 200 compras + 40 pares ata/contrato): ~US$ 0,000045 e 0,6 s
 por compra com 8 chamadas em paralelo; o lote de 125 mil compras vigentes sai por ~US$ 6 em
-~3 h. `PNCP_TRIAGE_MAX_COST_USD` põe um teto por execução. A validação humana está em
-[docs/validacao/](docs/validacao/) (planilha rotulada à mão + previsões do modelo à parte).
+~3 h. `PNCP_TRIAGE_MAX_COST_USD` põe um teto por execução.
+
+Validação humana (2026-11-13, 200 compras rotuladas + 40 pares ata/contrato, ver
+[docs/validacao/](docs/validacao/)): com limiar 0,45, 8 dos 9 "sim" viram `potencial`, 16 dos
+17 "talvez" viram `potencial` ou `indefinido`, e só 3 dos 174 "não" entram como `potencial`
+(EPI e "colete" refletivo). O único "sim" perdido é um objeto que mistura mobiliário escolar,
+informática e playground. Nos 40 pares, ata e contrato receberam a mesma decisão em todos.
 
 ## Banco
 
@@ -302,7 +307,7 @@ Fase 2: `DETAIL_CONCURRENCY` (1–8 threads), `DETAIL_REQUEST_DELAY` (padrão = 
 
 Fase 3: `OPENROUTER_API_KEY` (obrigatória para `triar`; nunca no repositório),
 `TRIAGE_MODEL` (padrão `typesafe/jev-1.14`), `TRIAGE_CONCURRENCY` (1–32, padrão 8),
-`TRIAGE_POTENTIAL_THRESHOLD` e `TRIAGE_GROUP_THRESHOLD` (padrão 0,5), `TRIAGE_MAX_ATTEMPTS`
+`TRIAGE_POTENTIAL_THRESHOLD` (padrão 0,45, calibrado na validação) e `TRIAGE_GROUP_THRESHOLD` (0,5), `TRIAGE_MAX_ATTEMPTS`
 e `TRIAGE_MAX_COST_USD` (teto de gasto por execução; sem limite quando não definidos).
 
 ## Testes
