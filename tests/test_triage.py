@@ -63,6 +63,14 @@ def test_potencial_acima_do_limiar_vira_potencial_mesmo_generico():
     assert suggested_groups(d.groups) == ["viaturas"]
 
 
+def test_grupo_acima_do_limiar_vira_potencial_mesmo_com_potencial_global_baixo():
+    # objeto misto: "moveis, informatica e playground" -> potencial 0.15, ti 0.59
+    d = decide(answers(potencial=0.15, ti_comunicacao=0.59))
+    assert d.status == TriageStatus.POTENCIAL
+    assert suggested_groups(d.groups) == ["ti_comunicacao"]
+    assert decide(answers(potencial=0.15, ti_comunicacao=0.59), group_threshold=0.6).status == TriageStatus.FORA_POR_ORA
+
+
 def test_generico_ou_edital_sem_potencial_vira_indefinido():
     assert decide(answers(potencial=0.1, clareza=Clarity.GENERICO)).status == TriageStatus.INDEFINIDO
     assert (

@@ -55,13 +55,17 @@ GRUPOS: dict[str, dict[str, Any]] = {
         "categorias": ["arma_fogo", "arma_nao_letal", "municao", "protecao_balistica"],
     },
     "vestuario_operacional": {
+        # "Uniforme" sozinho dispara em merendeira e gari; o que distingue e o
+        # usuario ser forca de seguranca (validado em docs/validacao).
         "entra": (
-            "Fardamento ou uniforme tatico/operacional, coturno, capa de colete, cinto de "
-            "guarnicao, equipamento individual textil operacional."
+            "Fardamento ou uniforme TATICO/OPERACIONAL de forca de seguranca (policia, guarda "
+            "municipal, defesa civil, bombeiros, agentes de transito, forcas armadas), coturno, "
+            "capa de colete, cinto de guarnicao."
         ),
         "nao_entra": (
-            "Uniforme social, administrativo ou escolar; insignia ou bordado avulso; EPI de obra "
-            "ou de saude; jaleco; camiseta promocional."
+            "Uniforme de merendeira, cozinheira, gari/coleta de lixo, motorista escolar, agente "
+            "de saude, servidor administrativo ou aluno; uniforme social ou escolar; insignia ou "
+            "bordado avulso; EPI de obra, limpeza ou saude; jaleco; camiseta promocional."
         ),
         "categorias": ["vestuario_operacional"],
     },
@@ -73,7 +77,9 @@ GRUPOS: dict[str, dict[str, Any]] = {
         ),
         "nao_entra": (
             "Pneu, peca, oleo, lubrificante, pelicula, giroflex ou sirene avulsa, kit de "
-            "caracterizacao, locacao de veiculo, combustivel, manutencao de frota, seguro."
+            "caracterizacao, locacao de veiculo, combustivel, manutencao de frota, seguro; "
+            "servico de transporte ou coleta FEITO com veiculos (coleta de lixo, transporte "
+            "escolar, servico veterinario com veiculo)."
         ),
         "categorias": ["viatura"],
     },
@@ -204,18 +210,20 @@ class TriageDecision:
 def decide(
     answers: dict[str, Any],
     *,
-    potential_threshold: float = 0.5,
+    potential_threshold: float = 0.45,
     group_threshold: float = 0.5,
 ) -> TriageDecision:
     """Da resposta do modelo ao status.
 
-    1. potencial >= limiar  -> `potencial`, mesmo com objeto generico: a fase 2
-       vai dizer o que ha dentro.
+    1. potencial >= limiar, OU algum grupo >= group_threshold -> `potencial`,
+       mesmo com objeto generico: a fase 2 vai dizer o que ha dentro. O "ou"
+       existe porque a pergunta global se dilui em objetos mistos ("moveis,
+       informatica e playground" deu 0,15 de potencial e 0,59 em ti_comunicacao;
+       uma moto no meio de merenda deu 0,20 e 0,97 em viaturas). A pergunta do
+       grupo enxerga o item escondido; a global ve a media.
     2. objeto generico ou "ver edital" -> `indefinido`: nao da para decidir pela
        capa; fica na fila do OCR dos arquivos (to-do).
     3. senao -> `fora_por_ora`.
-
-    `group_threshold` nao muda o status; so entra na lista de grupos sugeridos.
     """
     try:
         clarity = answers["clareza"]
@@ -231,7 +239,7 @@ def decide(
         potential=round(potential, 4),
         groups=groups,
     )
-    if potential >= potential_threshold:
+    if potential >= potential_threshold or any(p >= group_threshold for p in groups.values()):
         decision.status = TriageStatus.POTENCIAL
     elif decision.clarity in (Clarity.GENERICO, Clarity.REMETE_AO_EDITAL):
         decision.status = TriageStatus.INDEFINIDO
