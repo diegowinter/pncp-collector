@@ -71,6 +71,13 @@ def test_grupo_acima_do_limiar_vira_potencial_mesmo_com_potencial_global_baixo()
     assert decide(answers(potencial=0.15, ti_comunicacao=0.59), group_threshold=0.6).status == TriageStatus.FORA_POR_ORA
 
 
+def test_grupo_servicos_sozinho_nao_basta():
+    # "prestacao de servicos de plantao medico": servicos 0.7, potencial 0.03
+    assert decide(answers(potencial=0.03, servicos=0.7)).status == TriageStatus.FORA_POR_ORA
+    # concurso publico de verdade pontua tambem na global
+    assert decide(answers(potencial=0.8, servicos=0.9)).status == TriageStatus.POTENCIAL
+
+
 def test_generico_ou_edital_sem_potencial_vira_indefinido():
     assert decide(answers(potencial=0.1, clareza=Clarity.GENERICO)).status == TriageStatus.INDEFINIDO
     assert (

@@ -129,6 +129,13 @@ GRUPOS: dict[str, dict[str, Any]] = {
     },
 }
 
+# Grupos que sozinhos (sem a pergunta global) levam a compra a `potencial`. So os
+# de PRODUTO: o grupo `servicos` dispara em qualquer "prestacao de servicos"
+# (plantao medico, servico postal, ar-condicionado...) e, sozinho, so trazia
+# lixo numa amostra de 1.596 compras (13 casos, todos falsos). Servico de
+# interesse de verdade (concurso, CFTV) tambem pontua na pergunta global.
+STANDALONE_GROUPS = frozenset(g for g in GRUPOS if g != "servicos")
+
 _DOMINIO = (
     "pesquisa de precos de itens de seguranca publica: armamento e municao, protecao "
     "balistica, fardamento tatico, viaturas, radios e equipamentos de TI, drones, "
@@ -239,7 +246,8 @@ def decide(
         potential=round(potential, 4),
         groups=groups,
     )
-    if potential >= potential_threshold or any(p >= group_threshold for p in groups.values()):
+    standalone = any(p >= group_threshold for g, p in groups.items() if g in STANDALONE_GROUPS)
+    if potential >= potential_threshold or standalone:
         decision.status = TriageStatus.POTENCIAL
     elif decision.clarity in (Clarity.GENERICO, Clarity.REMETE_AO_EDITAL):
         decision.status = TriageStatus.INDEFINIDO
