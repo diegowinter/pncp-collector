@@ -19,9 +19,9 @@ genérico/remete ao edital; senão `fora_por_ora`.
 | Humano | Modelo | só global, 0,5 | só global, 0,45 | **global 0,45 ou grupo 0,5** |
 |---|---|---|---|---|
 | sim (9) | potencial | 6 | 8 | **9** |
-| talvez (17) | potencial ou indefinido | 16 | 17 | 16 |
-| não (174) | potencial (falso positivo) | 2 | 3 | 4 |
-| total marcado potencial | | 23/200 | 27/200 | 29/200 |
+| talvez (17) | potencial ou indefinido | 16 | 17 | 17 |
+| não (174) | potencial (falso positivo) | 2 | 3 | 3 |
+| total marcado potencial | | 23/200 | 27/200 | 28/200 |
 
 Por que o "ou" com os grupos: a pergunta global vê a média do objeto e se dilui quando ele
 lista várias coisas ("mobiliário escolar, equipamentos de informática e playground" deu 0,15 de
@@ -34,9 +34,8 @@ exigir que o usuário seja força de segurança (uniforme de merendeira e de gar
 feito com veículos.
 
 Falsos positivos que restam: "materiais de campo para ACE (equipamentos/EPI)", "coletes de
-segurança e identificação", "serviços administrativos para pagamento de taxas" (0,50, sem
-motivo aparente) e um serviço veterinário que lista "veículos" entre os recursos. Todos vão para
-a fase 2 e caem no classificador de itens.
+segurança e identificação" e "serviços administrativos para pagamento de taxas" (0,50, sem
+motivo aparente). Todos vão para a fase 2 e caem no classificador de itens.
 
 Pares: 40/40 com a mesma decisão para o objeto da ata e o do contrato (humano e modelo). A
 classificação da compra pode ser herdada pelos contratos derivados.
