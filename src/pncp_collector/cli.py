@@ -20,6 +20,7 @@ from .db import (
     drop_schema,
 )
 from .detail import STEPS, Detailer, render_detail_summary
+from .item_classifier import ItemClassifier, render_predict_summary, render_train_summary
 from .item_labeling import SLICES, ItemLabeler, render_label_summary
 from .models import LabelStatus, TriageStatus
 from .pipeline import Collector, render_summary
@@ -296,6 +297,58 @@ def triar_itens(
         sample_aleatorio=sample_aleatorio,
     )
     render_label_summary(console, stats)
+
+
+@app.command("treinar-itens")
+def treinar_itens(
+    class_weight: Annotated[
+        str | None,
+        typer.Option(
+            "--class-weight",
+            help="balanced (favorece recall, padrao) ou none (favorece precisao). "
+            "Padrao: PNCP_ITEM_CLASS_WEIGHT.",
+        ),
+    ] = None,
+    holdout: Annotated[
+        float, typer.Option("--holdout", help="Fracao separada para medir (padrao 0,1).")
+    ] = 0.1,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Fase 5: treina o classificador local de itens com os rotulos de item_labels.
+
+    Exclui o gabarito humano (PNCP_ITEM_VALIDATION_CSV), mede no holdout e no gabarito e
+    salva o modelo em PNCP_MODELS_DIR (fora do git). So banco e disco.
+    """
+    _setup_logging(verbose)
+    if class_weight not in (None, "balanced", "none"):
+        console.print("[red]--class-weight deve ser balanced ou none.[/red]")
+        raise typer.Exit(code=2)
+    stats = ItemClassifier(settings, console).train(holdout=holdout, class_weight=class_weight)
+    render_train_summary(console, stats)
+
+
+@app.command("prever-itens")
+def prever_itens(
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Refaz tambem itens ja previstos por este modelo.")
+    ] = False,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Maximo de compras nesta execucao.")
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Fase 5: grava em `itens` a categoria prevista, a confianca e o interesse de cada item.
+
+    Retomavel: sem --refresh, so itens ainda sem previsao do modelo atual.
+    """
+    _setup_logging(verbose)
+    classifier = ItemClassifier(settings, console)
+    try:
+        summary = classifier.predict(refresh=refresh, limit=limit)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    render_predict_summary(console, summary)
 
 
 @app.command()

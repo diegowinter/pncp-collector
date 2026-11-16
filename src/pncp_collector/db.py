@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import Engine, case, create_engine, delete, func, select, text, update
+from sqlalchemy import Engine, bindparam, case, create_engine, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -744,3 +744,89 @@ class DetailRepository:
             ItemLabel.sample_slice, ItemLabel.label_status
         )
         return {f"{s}:{st}": n for s, st, n in self.session.execute(query)}
+
+    # --- fase 5 (classificador local de itens) ----------------------------------------
+
+    def training_rows(self) -> list[tuple[str, str, str]]:
+        """(descricao_norm, objeto, categoria) de todo rotulo ok em item_labels."""
+        query = select(ItemLabel.descricao_norm, ItemLabel.objeto, ItemLabel.label_category).where(
+            ItemLabel.label_status == LabelStatus.OK
+        )
+        return [(d, o or "", c) for d, o, c in self.session.execute(query)]
+
+    def objeto_by_descricao(self, descricoes: Sequence[str]) -> dict[str, str]:
+        """Objeto de UMA compra exemplo para cada descricao normalizada (contexto da
+        validacao, que so tem a descricao)."""
+        if not descricoes:
+            return {}
+        norm = self.DESCRICAO_NORM_SQL
+        sql = text(
+            f"""select v.d, coalesce(c.objeto, '')
+                  from (select {norm} as d, min(i.compra_key) as ck
+                          from itens i
+                         where {norm} = any(:ds)
+                         group by 1) v
+                  join compras c on c.compra_key = v.ck"""
+        )
+        return {d: o for d, o in self.session.execute(sql, {"ds": list(descricoes)})}
+
+    def count_items_to_predict(self, model_id: str, refresh: bool) -> int:
+        query = select(func.count()).select_from(Item).where(Item.descricao.is_not(None))
+        if not refresh:
+            query = query.where(
+                (Item.predicted_model.is_(None)) | (Item.predicted_model != model_id)
+            )
+        return self.session.scalar(query) or 0
+
+    def select_compras_to_predict(self, model_id: str, refresh: bool, limit: int | None) -> list[str]:
+        """Chaves das compras com algum item ainda sem previsao deste modelo."""
+        query = select(Item.compra_key).where(Item.descricao.is_not(None))
+        if not refresh:
+            query = query.where(
+                (Item.predicted_model.is_(None)) | (Item.predicted_model != model_id)
+            )
+        query = query.group_by(Item.compra_key).order_by(Item.compra_key)
+        if limit:
+            query = query.limit(limit)
+        return list(self.session.scalars(query))
+
+    def items_with_objeto(self, compra_keys: Sequence[str]) -> list[tuple[str, int, str, str]]:
+        """(compra_key, numero_item, descricao, objeto) dos itens dessas compras."""
+        query = (
+            select(Item.compra_key, Item.numero_item, Item.descricao, Compra.objeto)
+            .join(Compra, Compra.compra_key == Item.compra_key)
+            .where(Item.compra_key.in_(list(compra_keys)), Item.descricao.is_not(None))
+        )
+        return [(k, n, d, o or "") for k, n, d, o in self.session.execute(query)]
+
+    def update_item_predictions(self, rows: Sequence[dict[str, Any]]) -> None:
+        """Cada linha: compra_key, numero_item e as colunas predicted_*."""
+        if not rows:
+            return
+        self.session.execute(
+            update(Item)
+            .where(Item.compra_key == bindparam("b_compra_key"), Item.numero_item == bindparam("b_numero_item"))
+            .values(
+                predicted_category=bindparam("b_category"),
+                predicted_confidence=bindparam("b_confidence"),
+                predicted_interest=bindparam("b_interest"),
+                predicted_model=bindparam("b_model"),
+                predicted_at=bindparam("b_at"),
+            ),
+            [
+                {
+                    "b_compra_key": r["compra_key"],
+                    "b_numero_item": r["numero_item"],
+                    "b_category": r["predicted_category"],
+                    "b_confidence": r["predicted_confidence"],
+                    "b_interest": r["predicted_interest"],
+                    "b_model": r["predicted_model"],
+                    "b_at": r["predicted_at"],
+                }
+                for r in rows
+            ],
+        )
+
+    def count_items_by_prediction(self) -> dict[str, int]:
+        query = select(Item.predicted_category, func.count()).group_by(Item.predicted_category)
+        return {(c or "sem_previsao"): n for c, n in self.session.execute(query)}

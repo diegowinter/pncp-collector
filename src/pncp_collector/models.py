@@ -334,6 +334,13 @@ class Item(Base, StampMixin):
     data_inclusao: Mapped[date | None] = mapped_column(Date)
     data_atualizacao: Mapped[date | None] = mapped_column(Date)
 
+    # Fase 5: previsao do classificador local (item_classifier). Controle nosso.
+    predicted_category: Mapped[str | None] = mapped_column(String(40), index=True)
+    predicted_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    predicted_interest: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    predicted_model: Mapped[str | None] = mapped_column(String(80))
+    predicted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     raw: Mapped[dict] = mapped_column(JSONB)
 
 

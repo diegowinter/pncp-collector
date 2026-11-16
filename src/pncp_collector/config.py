@@ -92,6 +92,17 @@ class Settings(BaseSettings):
     # Teto de gasto por execucao, em dolares; None = sem teto.
     triage_max_cost_usd: float | None = Field(default=None, ge=0.0)
 
+    # Fase 5 (classificador local de itens). O modelo e derivado de item_labels e do
+    # codigo: nao vai no repositorio; qualquer maquina com o banco o refaz em minutos.
+    models_dir: str = "models"
+    # Gabarito humano: essas descricoes ficam fora do treino e medem o resultado.
+    item_validation_csv: str = "docs/validacao/amostra_itens_2026-11-14_claude.csv"
+    # "balanced" favorece recall nas classes raras (filtro do passo C); "none" favorece
+    # precisao. Medido em 2026-11-14: balanced P=0,83 R=0,98; none P=0,91 R=0,96.
+    item_class_weight: str = "balanced"
+    # Probabilidade minima de "e de interesse" (1 - P(outros)) para o item contar.
+    item_interest_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
     # Recortes opcionais da consulta.
     cnpj: str | None = None
     codigo_unidade_administrativa: str | None = None

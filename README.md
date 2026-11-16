@@ -23,6 +23,8 @@ uv run pncp-collector contratos     # fase 1: varredura por publicação
 uv run pncp-collector triar --origem ata   # fase 3: triagem pelo objeto (modelo de decisões), só compras de atas
 uv run python scripts/baixar_itens.py      # passo B para todas as compras de ata, sem passar pelo passo A
 uv run pncp-collector triar-itens          # fase 4: rotula descrições de item para treinar o classificador local
+uv run pncp-collector treinar-itens        # fase 5: treina o classificador local com item_labels (modelo em models/)
+uv run pncp-collector prever-itens         # fase 5: grava categoria prevista, confiança e interesse em cada item
 uv run pncp-collector detalhar --triagem potencial   # fase 2 só nas compras que a triagem apontou
 uv run pncp-collector detalhar      # fase 2: arquivos, itens e resultados das capas no banco
 uv run pncp-collector status        # quanto falta, por status
@@ -261,6 +263,32 @@ Medido em 2026-11-14 nas 56.570 compras de ata detalhadas (potenciais, indefinid
 `fora_por_ora`): 2.470.697 itens, 1.656.271 descrições distintas, 38.477 na peneira. O
 conjunto de treino inteiro (~88 mil descrições) custa US$ 7 a 11 ao preço medido na fase 3.
 
+## Classificador local de itens (fase 5)
+
+O rotulador pago (fase 4) ensina; quem classifica os milhões de itens é um modelo local, de
+graça, treinado em `item_labels`. Dois comandos, só banco e disco:
+
+| Comando | O que faz |
+|---|---|
+| `treinar-itens` | Lê os rótulos `ok` de `item_labels`, **exclui** o gabarito humano (`PNCP_ITEM_VALIDATION_CSV`, as 300 descrições de [docs/validacao/](docs/validacao/)), separa 10% para holdout, treina e mede nos dois. Salva `models/item_classifier.joblib` e um JSON com métricas, versão do scikit-learn e `model_id`; registra em `collection_runs` (`treino_itens`). |
+| `prever-itens` | Carrega o modelo e grava em cada linha de `itens`: `predicted_category`, `predicted_confidence` (maior probabilidade), `predicted_interest` (1 − P(outros)), `predicted_model`, `predicted_at`. Retomável: só itens sem previsão do modelo atual; `--refresh` refaz. |
+
+Modelo: TF-IDF da descrição em palavras (1-2 gramas) e caracteres (3-5), mais o objeto da
+compra em palavras como contexto (desambigua "colete" da Guarda Municipal do colete de agente
+de saúde), e regressão logística. `PNCP_ITEM_CLASS_WEIGHT=balanced` (padrão) favorece recall
+nas classes raras, que é o que o filtro do passo C precisa; `none` favorece precisão.
+
+O binário **não vai no repositório** (`models/` está no `.gitignore`): é derivado de
+`item_labels` + código + versão do scikit-learn, e qualquer máquina com o banco o refaz em
+poucos minutos. Para levar o processo a outro PC: dump do banco, clone, `.env`, `uv sync`,
+`treinar-itens`.
+
+Medido em 2026-11-14 (101.774 rótulos, holdout 10%, gabarito de 300): com `balanced`, acerto
+0,96 no gabarito, interesse P=0,83 R=0,98; sem peso, acerto 0,973, P=0,91 R=0,96. Treino em
+~4 min e previsão de 1,66 milhão de descrições em ~9 min na CPU (Core Ultra 5, 14 núcleos).
+Nos 2,47 milhões de itens das 56 mil compras de ata então detalhadas: 58 mil itens de
+interesse (2,3%); das compras `fora_por_ora`, 5,8% escondiam item de interesse.
+
 ## Banco
 
 **Convenção de nomes:** as colunas que vêm do PNCP mantêm o nome da API, apenas
@@ -325,6 +353,13 @@ Fase 4:
 - `collection_runs` recebe `dataset = 'rotulos_itens'`.
 - Banco já existente: [docs/MIGRACAO_ITEM_LABELS.sql](docs/MIGRACAO_ITEM_LABELS.sql), ou
   qualquer comando (o `create_all` cria a tabela nova).
+
+Fase 5:
+
+- `itens` ganha `predicted_category`, `predicted_confidence`, `predicted_interest`, `predicted_model`,
+  `predicted_at` (controle nosso; o upsert do passo B não os toca).
+- `collection_runs` recebe `dataset = 'treino_itens'` (métricas) e `'previsao_itens'`.
+- Banco já existente: [docs/MIGRACAO_PREVISAO_ITENS.sql](docs/MIGRACAO_PREVISAO_ITENS.sql) (idempotente).
 - Banco criado antes de `processo`/`numero_contrato_empenho`/`numero_ata_registro_preco`
   virarem `TEXT`: [docs/MIGRACAO_TEXTO_LIVRE.sql](docs/MIGRACAO_TEXTO_LIVRE.sql)
   (so metadado, roda em segundos). Sem ela um valor acima de 120 caracteres dá
@@ -356,6 +391,9 @@ e `TRIAGE_MAX_COST_USD` (teto de gasto por execução; sem limite quando não de
 
 Fase 4: usa as mesmas variáveis da fase 3 (`OPENROUTER_API_KEY`, `TRIAGE_MODEL`,
 `TRIAGE_CONCURRENCY`, `TRIAGE_MAX_ATTEMPTS`, `TRIAGE_MAX_COST_USD`).
+
+Fase 5: `MODELS_DIR` (padrão `models`), `ITEM_VALIDATION_CSV`, `ITEM_CLASS_WEIGHT` (`balanced` ou
+`none`) e `ITEM_INTEREST_THRESHOLD` (0,5; probabilidade mínima de interesse para o item contar).
 
 ## Testes
 

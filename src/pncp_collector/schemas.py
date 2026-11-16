@@ -153,6 +153,12 @@ CONTROL_COLUMNS = frozenset(
         "is_winner",
         "documento_tipo",
         "documento_id",
+        # fase 5 (classificador local de itens)
+        "predicted_category",
+        "predicted_confidence",
+        "predicted_interest",
+        "predicted_model",
+        "predicted_at",
     }
 )
 
