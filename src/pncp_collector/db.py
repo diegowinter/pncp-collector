@@ -803,9 +803,15 @@ class DetailRepository:
         """Cada linha: compra_key, numero_item e as colunas predicted_*."""
         if not rows:
             return
+        # Tabela Core, nao a entidade ORM: UPDATE em lote (executemany) com WHERE por
+        # parametro nao passa pela sincronizacao de sessao, que o ORM exigiria.
+        table = Item.__table__
         self.session.execute(
-            update(Item)
-            .where(Item.compra_key == bindparam("b_compra_key"), Item.numero_item == bindparam("b_numero_item"))
+            update(table)
+            .where(
+                table.c.compra_key == bindparam("b_compra_key"),
+                table.c.numero_item == bindparam("b_numero_item"),
+            )
             .values(
                 predicted_category=bindparam("b_category"),
                 predicted_confidence=bindparam("b_confidence"),
