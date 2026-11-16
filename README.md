@@ -21,6 +21,8 @@ uv run pncp-collector init-db
 uv run pncp-collector atas          # fase 1: varredura por vigência
 uv run pncp-collector contratos     # fase 1: varredura por publicação
 uv run pncp-collector triar --origem ata   # fase 3: triagem pelo objeto (modelo de decisões), só compras de atas
+uv run python scripts/baixar_itens.py      # passo B para todas as compras de ata, sem passar pelo passo A
+uv run pncp-collector triar-itens          # fase 4: rotula descrições de item para treinar o classificador local
 uv run pncp-collector detalhar --triagem potencial   # fase 2 só nas compras que a triagem apontou
 uv run pncp-collector detalhar      # fase 2: arquivos, itens e resultados das capas no banco
 uv run pncp-collector status        # quanto falta, por status
@@ -231,6 +233,34 @@ refletivo e um serviço administrativo em 0,50). Nos 40 pares, ata e contrato re
 decisão em todos. A regra do "ou" com os grupos veio daí: a pergunta global se dilui em objetos
 mistos ("móveis, informática e playground" deu 0,15), e a do grupo enxerga o item escondido.
 
+## Rotulagem de itens (fase 4)
+
+A capa decide a **ordem** da fila, mas não revela o que a compra tem dentro: na sondagem de
+2026-11-14, o que escapa como `fora_por_ora` é sempre um item solto numa compra mista ("um
+tablet entre 31 eletrodomésticos"). O corte certo é pelo **item**, e classificar 2,5 milhões de
+itens com o modelo pago não compensa. Esta fase fabrica o **conjunto de treino** de um
+classificador local: o modelo de decisões vira rotulador, e o classificador treinado é quem
+roda nos itens todos.
+
+Unidade: a **descrição distinta** do item (minúsculas, espaços colapsados), não a linha de
+`itens`: "Pneu veículo automotivo" aparece em centenas de compras e ganha um rótulo só
+(`item_count` diz quantas linhas ele cobre). Tabela `item_labels`.
+
+Dois passos, ambos retomáveis (`triar-itens`):
+
+| Passo | O que faz |
+|---|---|
+| semear | Escolhe as descrições da amostra em três fatias (`sample_slice`): **peneira** (toda descrição que bate na regex de palavras-chave `item_rules.SIEVE_PATTERN`, de propósito larga: pistola de cola e calibre de cateter entram e viram negativos difíceis), **reserva** (fora da peneira, mas de compra `potencial`: mede o que a peneira perde) e **aleatório** (fora da peneira, sorteada: o "não" comum). Os sorteios são por `md5` da descrição, estáveis entre execuções; `--sample-reserva` e `--sample-aleatorio` são tamanhos alvo (padrão 10 mil e 40 mil), e a semeadura só completa o que falta. Sem API. |
+| rotular | Uma chamada por descrição pendente ao endpoint de decisões, com a descrição, unidade, valor estimado e o objeto da compra como contexto. Perguntas (`item_rules.build_item_questions`): `categoria` (`choice` entre as 14 categorias de item do pesquisa-de-precos-pncp mais `outros`) e `interesse` (probabilidade de ser produto-fim de uma das 14). Grava `label_category`, `label_confidence`, `label_interest`, `label_probabilities` e a resposta crua. Mesmo teto `PNCP_TRIAGE_MAX_COST_USD`. |
+
+Não há limiar: o rótulo é a escolha do modelo e as probabilidades ficam na linha para o treino
+decidir o que fazer com a faixa de dúvida. Rotular tudo de novo com outro modelo é `triar-itens
+--status ok`.
+
+Medido em 2026-11-14 nas 56.570 compras de ata detalhadas (potenciais, indefinidas e 30 mil
+`fora_por_ora`): 2.470.697 itens, 1.656.271 descrições distintas, 38.477 na peneira. O
+conjunto de treino inteiro (~88 mil descrições) custa US$ 7 a 11 ao preço medido na fase 3.
+
 ## Banco
 
 **Convenção de nomes:** as colunas que vêm do PNCP mantêm o nome da API, apenas
@@ -284,6 +314,17 @@ Fase 3:
   só os nomes das colunas são em inglês, como os demais campos de controle.
 - `collection_runs` recebe `dataset = 'triagem'` com chamadas, custo em dólares e tokens.
 - Banco já existente: [docs/MIGRACAO_TRIAGEM.sql](docs/MIGRACAO_TRIAGEM.sql) (idempotente).
+
+Fase 4:
+
+- `item_labels`: PK `descricao_norm`; `descricao`, `compra_key`, `objeto`, `unidade_medida`,
+  `valor_unitario_estimado`, `material_ou_servico_nome` do item exemplo; `item_count`;
+  `sample_slice` (`peneira` / `reserva` / `aleatorio`); `label_status`, `label_category`,
+  `label_confidence`, `label_interest`, `label_probabilities`, `label_model`, `label_error`,
+  `label_attempts`, `labeled_at`, `label_raw`.
+- `collection_runs` recebe `dataset = 'rotulos_itens'`.
+- Banco já existente: [docs/MIGRACAO_ITEM_LABELS.sql](docs/MIGRACAO_ITEM_LABELS.sql), ou
+  qualquer comando (o `create_all` cria a tabela nova).
 - Banco criado antes de `processo`/`numero_contrato_empenho`/`numero_ata_registro_preco`
   virarem `TEXT`: [docs/MIGRACAO_TEXTO_LIVRE.sql](docs/MIGRACAO_TEXTO_LIVRE.sql)
   (so metadado, roda em segundos). Sem ela um valor acima de 120 caracteres dá
@@ -313,6 +354,9 @@ Fase 3: `OPENROUTER_API_KEY` (obrigatória para `triar`; nunca no repositório),
 `TRIAGE_POTENTIAL_THRESHOLD` (padrão 0,45, calibrado na validação) e `TRIAGE_GROUP_THRESHOLD` (0,5), `TRIAGE_MAX_ATTEMPTS`
 e `TRIAGE_MAX_COST_USD` (teto de gasto por execução; sem limite quando não definidos).
 
+Fase 4: usa as mesmas variáveis da fase 3 (`OPENROUTER_API_KEY`, `TRIAGE_MODEL`,
+`TRIAGE_CONCURRENCY`, `TRIAGE_MAX_ATTEMPTS`, `TRIAGE_MAX_COST_USD`).
+
 ## Testes
 
 ```bash
@@ -340,6 +384,9 @@ Ver § Detalhamento e [docs/API_DETALHE.md](docs/API_DETALHE.md).
 
 Fase 3: ~US$ 0,000045 por compra no `typesafe/jev-1.14` (medido em 2026-11-13); ver
 § Triagem por objeto. É a fase mais barata e a que decide quanto a fase 2 vai custar.
+
+Fase 4: uma chamada por descrição distinta, ao mesmo preço; o conjunto de treino inteiro
+(~88 mil descrições) fica em US$ 7 a 11. Ver § Rotulagem de itens.
 
 ## Convenção de commits
 

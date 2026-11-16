@@ -20,7 +20,8 @@ from .db import (
     drop_schema,
 )
 from .detail import STEPS, Detailer, render_detail_summary
-from .models import TriageStatus
+from .item_labeling import SLICES, ItemLabeler, render_label_summary
+from .models import LabelStatus, TriageStatus
 from .pipeline import Collector, render_summary
 from .triage import Triager, render_triage_summary
 
@@ -231,6 +232,70 @@ def triar(
         statuses=statuses, limit=limit, seed=not no_seed, triage=not only_seed, source=origem
     )
     render_triage_summary(console, stats, settings)
+
+
+@app.command("triar-itens")
+def triar_itens(
+    status: Annotated[
+        str | None,
+        typer.Option(
+            "--status",
+            help="label_status a (re)rotular, separados por virgula. Padrao: pendente,erro.",
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Maximo de descricoes nesta execucao.")
+    ] = None,
+    fatia: Annotated[
+        str | None,
+        typer.Option("--fatia", help="So uma fatia da amostra: peneira, reserva, aleatorio ou ativo."),
+    ] = None,
+    sample_reserva: Annotated[
+        int, typer.Option("--sample-reserva", help="Tamanho alvo da fatia reserva.")
+    ] = 10_000,
+    sample_aleatorio: Annotated[
+        int, typer.Option("--sample-aleatorio", help="Tamanho alvo da fatia aleatorio.")
+    ] = 40_000,
+    no_seed: Annotated[
+        bool, typer.Option("--no-seed", help="Nao semeia item_labels a partir de itens antes.")
+    ] = False,
+    only_seed: Annotated[
+        bool, typer.Option("--only-seed", help="So semeia; nao chama o modelo.")
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Fase 4: rotula descricoes distintas de item (modelo de decisoes) para o treino.
+
+    Semeia `item_labels` com a peneira inteira mais as fatias reserva e aleatorio, e
+    pede ao modelo a categoria de cada descricao pendente. Teto de gasto:
+    PNCP_TRIAGE_MAX_COST_USD.
+    """
+    _setup_logging(verbose)
+    if fatia is not None and fatia not in SLICES:
+        console.print(f"[red]--fatia deve ser uma de {', '.join(SLICES)}.[/red]")
+        raise typer.Exit(code=2)
+    if not only_seed and not settings.openrouter_api_key:
+        console.print("[red]Defina PNCP_OPENROUTER_API_KEY (.env) para chamar o modelo.[/red]")
+        raise typer.Exit(code=2)
+    statuses = None
+    if status:
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        known = {LabelStatus.PENDENTE, LabelStatus.OK, LabelStatus.ERRO}
+        bad = [s for s in statuses if s not in known]
+        if bad:
+            console.print(f"[red]label_status desconhecido: {', '.join(bad)}.[/red]")
+            raise typer.Exit(code=2)
+    labeler = ItemLabeler(settings, console)
+    stats = labeler.run(
+        statuses=statuses,
+        limit=limit,
+        seed=not no_seed,
+        label=not only_seed,
+        sample_slice=fatia,
+        sample_reserva=sample_reserva,
+        sample_aleatorio=sample_aleatorio,
+    )
+    render_label_summary(console, stats)
 
 
 @app.command()

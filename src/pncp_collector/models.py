@@ -81,6 +81,14 @@ class TriageStatus:
     ERRO = "erro"
 
 
+class LabelStatus:
+    """Estado da rotulagem de uma descricao de item (fase 4). Ver item_rules."""
+
+    PENDENTE = "pendente"
+    OK = "ok"
+    ERRO = "erro"
+
+
 class ResultsStatus:
     """Estado da busca de resultados de uma compra (N chamadas; pode parar no meio)."""
 
@@ -327,6 +335,49 @@ class Item(Base, StampMixin):
     data_atualizacao: Mapped[date | None] = mapped_column(Date)
 
     raw: Mapped[dict] = mapped_column(JSONB)
+
+
+class ItemLabel(Base, StampMixin):
+    """Rotulo de uma DESCRICAO de item (fase 4), nao de uma linha de `itens`.
+
+    A mesma descricao ("Pneu veiculo automotivo") aparece em centenas de compras;
+    o rotulo e pedido ao modelo uma vez e vale para todas. A chave e a descricao
+    normalizada (minusculas, espacos colapsados; ver item_rules.normalize_descricao).
+    Os demais campos sao de UM item exemplo, so para dar contexto ao modelo.
+    Tabela nossa: controle em ingles, valores em portugues.
+    """
+
+    __tablename__ = "item_labels"
+
+    descricao_norm: Mapped[str] = mapped_column(Text, primary_key=True)
+    descricao: Mapped[str] = mapped_column(Text)
+    compra_key: Mapped[str | None] = mapped_column(String(80), index=True)
+    objeto: Mapped[str | None] = mapped_column(Text)
+    unidade_medida: Mapped[str | None] = mapped_column(Text)
+    valor_unitario_estimado: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    material_ou_servico_nome: Mapped[str | None] = mapped_column(String(40))
+    item_count: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
+    # De qual fatia da amostra de treino a descricao veio: peneira (bateu na
+    # regex de palavras-chave), reserva (compra potencial, fora da peneira) ou
+    # aleatorio (fora da peneira, sorteada).
+    sample_slice: Mapped[str] = mapped_column(String(20), index=True)
+
+    label_status: Mapped[str] = mapped_column(
+        String(20),
+        default=LabelStatus.PENDENTE,
+        server_default=LabelStatus.PENDENTE,
+        index=True,
+    )
+    label_category: Mapped[str | None] = mapped_column(String(40), index=True)
+    label_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    label_interest: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    label_probabilities: Mapped[dict | None] = mapped_column(JSONB)
+    label_model: Mapped[str | None] = mapped_column(Text)
+    label_error: Mapped[str | None] = mapped_column(Text)
+    label_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    labeled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    label_raw: Mapped[dict | None] = mapped_column(JSONB)
 
 
 class ItemResultado(Base, StampMixin):

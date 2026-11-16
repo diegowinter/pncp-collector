@@ -42,3 +42,26 @@ classificação da compra pode ser herdada pelos contratos derivados.
 
 Decisão: `PNCP_TRIAGE_POTENTIAL_THRESHOLD = 0.45`, `PNCP_TRIAGE_GROUP_THRESHOLD = 0.5`. Custo
 total das rodadas de validação: ~US$ 0,05.
+
+# Validação da rotulagem de itens (fase 4)
+
+Amostra de 2026-11-14: 300 descrições distintas de item sorteadas de `item_labels` (150 da
+fatia `peneira`, 100 `aleatorio`, 50 `reserva`; ordem estável por `md5('validacao-2026-11-14' ||
+descricao_norm)`). Pré-preenchida por Claude (Fable 5.1) com o critério de
+`item_rules.CATEGORIAS`; Diego revisa na coluna `categoria_diego`.
+
+| Arquivo | O que é |
+|---|---|
+| `amostra_itens_2026-11-14.xlsx` | planilha para revisão (abas `instrucoes`, `itens`) |
+| `amostra_itens_2026-11-14_claude.csv` | as mesmas 300 com `descricao_norm` e o rótulo de Claude, para o treino **excluir** essas descrições e para medir o Jev e o classificador local contra elas |
+
+Distribuição do pré-preenchimento: 249 `outros`, 29 `equip_ti`, 10 `viatura`, 4
+`equip_comunicacao`, 2 `drone_rpas`, 2 `vestuario_operacional`, 2 `servico_seguranca`, 1
+`protecao_balistica`, 1 `manutencao_controle_acesso`. Casos limite anotados em `obs_claude`
+(smartphone genérico, triciclo de carga motorizado, catraca com instalação, descrição vazia
+"LOTE Nº 46").
+
+Calibração do Jev (200 descrições, 2026-11-14): US$ 0,000117 por descrição (2.842 tokens de
+entrada), 36 de 120 da peneira fora de `outros`, 0 de 50 aleatórias, 1 de 30 da reserva. As
+previsões do Jev para estas 300 entram em `amostra_itens_2026-11-14_jev.csv` depois do lote
+completo.

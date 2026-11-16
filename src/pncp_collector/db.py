@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import Engine, create_engine, delete, func, select, update
+from sqlalchemy import Engine, case, create_engine, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -24,8 +24,10 @@ from .models import (
     Contrato,
     DetailStatus,
     Item,
+    ItemLabel,
     ItemResultado,
     ItemsStatus,
+    LabelStatus,
     ResultsStatus,
     TriageStatus,
 )
@@ -79,12 +81,17 @@ def drop_schema(engine: Engine) -> None:
     Base.metadata.drop_all(engine)
 
 
+# Limite do protocolo do Postgres: 65535 parametros por comando. Uma compra com
+# 5.551 itens (25 colunas cada) estourou isso em 2026-11-14; o INSERT vai em lotes.
+MAX_BIND_PARAMS = 60000
+
+
 def upsert(session: Session, model: type[Base], rows: Sequence[dict[str, Any]]) -> int:
     """Insere ou atualiza pela chave primaria. Reexecucoes ficam idempotentes.
 
     No conflito so as colunas que vieram nas linhas sao atualizadas: as demais
     (o estado da fase 2 numa capa, por exemplo) ficam como estao, em vez de
-    voltar ao default.
+    voltar ao default. Linhas demais para um comando so vao em varios.
     """
     if not rows:
         return 0
@@ -92,18 +99,19 @@ def upsert(session: Session, model: type[Base], rows: Sequence[dict[str, Any]]) 
     primary_key = [column.name for column in model.__table__.primary_key.columns]
     preserved = set(primary_key) | {"collected_at", "updated_at"}
     sent = set().union(*(row.keys() for row in rows))
-
-    statement = insert(model).values(list(rows))
-    updatable = {
-        column.name: statement.excluded[column.name]
+    updatable_names = [
+        column.name
         for column in model.__table__.columns
         if column.name in sent and column.name not in preserved
-    }
-    updatable["updated_at"] = func.now()
-    statement = statement.on_conflict_do_update(
-        index_elements=primary_key, set_=updatable
-    )
-    session.execute(statement)
+    ]
+    batch_size = max(1, MAX_BIND_PARAMS // max(1, len(sent)))
+
+    for start in range(0, len(rows), batch_size):
+        statement = insert(model).values(list(rows[start : start + batch_size]))
+        updatable = {name: statement.excluded[name] for name in updatable_names}
+        updatable["updated_at"] = func.now()
+        statement = statement.on_conflict_do_update(index_elements=primary_key, set_=updatable)
+        session.execute(statement)
     return len(rows)
 
 
@@ -230,6 +238,19 @@ class TriageRow:
     compra_key: str
     objeto: str
     triage_attempts: int
+
+
+@dataclass
+class ItemLabelRow:
+    """Uma descricao distinta a rotular (fase 4), com o contexto do item exemplo."""
+
+    descricao_norm: str
+    descricao: str
+    objeto: str | None
+    unidade_medida: str | None
+    valor_unitario_estimado: Any
+    material_ou_servico_nome: str | None
+    label_attempts: int
 
 
 def _doc_row(tipo: str, obj: Ata | Contrato) -> DocumentRow:
@@ -601,3 +622,125 @@ class DetailRepository:
 
     def upsert_arquivos(self, rows: Sequence[dict[str, Any]]) -> int:
         return upsert(self.session, Arquivo, rows)
+
+    # --- fase 4 (rotulagem de itens) --------------------------------------------------
+
+    # Mesma normalizacao de item_rules.normalize_descricao. Mudou uma, muda a outra.
+    DESCRICAO_NORM_SQL = r"lower(regexp_replace(btrim(i.descricao), '\s+', ' ', 'g'))"
+
+    def seed_item_labels(self, sample_slice: str, pattern: str, limit: int | None) -> int:
+        """Cria as linhas de `item_labels` de uma fatia da amostra de treino, a partir
+        das descricoes distintas de `itens` que ainda nao estao na tabela:
+
+            peneira    descricao bate na regex (todas, ou ate `limit`)
+            reserva    nao bate, mas a compra e `potencial` (sorteio ate `limit`)
+            aleatorio  nao bate (sorteio ate `limit`)
+
+        O sorteio e por md5 da descricao normalizada: estavel entre execucoes.
+        Devolve quantas linhas entraram."""
+        if sample_slice == "peneira":
+            where = f"i.descricao ~* :pattern"
+        elif sample_slice == "reserva":
+            where = f"NOT (i.descricao ~* :pattern) AND c.triage_status = '{TriageStatus.POTENCIAL}'"
+        elif sample_slice == "aleatorio":
+            where = "NOT (i.descricao ~* :pattern)"
+        else:
+            raise ValueError(f"fatia desconhecida: {sample_slice!r}")
+        norm = self.DESCRICAO_NORM_SQL
+        sql = f"""
+            WITH d AS (
+                SELECT {norm} AS descricao_norm,
+                       min(i.descricao) AS descricao,
+                       min(i.compra_key) AS compra_key,
+                       count(*) AS item_count
+                  FROM itens i
+                  JOIN compras c ON c.compra_key = i.compra_key
+                 WHERE i.descricao IS NOT NULL AND btrim(i.descricao) <> '' AND {where}
+                 GROUP BY 1
+            ),
+            picked AS (
+                SELECT d.*
+                  FROM d
+                 WHERE NOT EXISTS (SELECT 1 FROM item_labels l WHERE l.descricao_norm = d.descricao_norm)
+                 ORDER BY md5(d.descricao_norm)
+                 {"LIMIT :limit" if limit else ""}
+            )
+            INSERT INTO item_labels (descricao_norm, descricao, compra_key, objeto, unidade_medida,
+                                     valor_unitario_estimado, material_ou_servico_nome, item_count,
+                                     sample_slice, label_status, label_attempts)
+            SELECT p.descricao_norm, p.descricao, p.compra_key, c.objeto, x.unidade_medida,
+                   x.valor_unitario_estimado, x.material_ou_servico_nome, p.item_count,
+                   :slice, '{LabelStatus.PENDENTE}', 0
+              FROM picked p
+              JOIN compras c ON c.compra_key = p.compra_key
+              JOIN LATERAL (
+                    SELECT i.unidade_medida, i.valor_unitario_estimado, i.material_ou_servico_nome
+                      FROM itens i
+                     WHERE i.compra_key = p.compra_key AND {norm} = p.descricao_norm
+                     LIMIT 1
+              ) x ON true
+            ON CONFLICT (descricao_norm) DO NOTHING
+        """
+        params: dict[str, Any] = {"pattern": pattern, "slice": sample_slice}
+        if limit:
+            params["limit"] = limit
+        result = self.session.execute(text(sql), params)
+        self.session.commit()
+        return result.rowcount or 0
+
+    def select_item_labels(
+        self,
+        statuses: Sequence[str],
+        *,
+        max_attempts: int | None,
+        limit: int | None = None,
+        sample_slice: str | None = None,
+    ) -> list[ItemLabelRow]:
+        query = select(ItemLabel).where(ItemLabel.label_status.in_(list(statuses)))
+        if sample_slice:
+            query = query.where(ItemLabel.sample_slice == sample_slice)
+        if max_attempts is not None:
+            query = query.where(
+                ~(
+                    (ItemLabel.label_status == LabelStatus.ERRO)
+                    & (ItemLabel.label_attempts >= max_attempts)
+                )
+            )
+        # Peneira primeiro (alfabetico: 'aleatorio' < 'peneira' < 'reserva' nao serve),
+        # e dentro da fatia em ordem estavel mas embaralhada, para que um --limit
+        # pequeno seja uma amostra e nao as descricoes que comecam com digito.
+        order = case(
+            {"peneira": 0, "reserva": 1, "aleatorio": 2, "ativo": 3}, value=ItemLabel.sample_slice, else_=4
+        )
+        query = query.order_by(order, func.md5(ItemLabel.descricao_norm))
+        if limit:
+            query = query.limit(limit)
+        return [
+            ItemLabelRow(
+                descricao_norm=obj.descricao_norm,
+                descricao=obj.descricao,
+                objeto=obj.objeto,
+                unidade_medida=obj.unidade_medida,
+                valor_unitario_estimado=obj.valor_unitario_estimado,
+                material_ou_servico_nome=obj.material_ou_servico_nome,
+                label_attempts=obj.label_attempts or 0,
+            )
+            for obj in self.session.scalars(query)
+        ]
+
+    def update_item_labels(self, rows: Sequence[dict[str, Any]]) -> None:
+        """Cada linha traz descricao_norm mais as colunas label_* a gravar."""
+        for row in rows:
+            values = {k: v for k, v in row.items() if k != "descricao_norm"}
+            self.session.execute(
+                update(ItemLabel)
+                .where(ItemLabel.descricao_norm == row["descricao_norm"])
+                .values(**values)
+            )
+
+    def count_item_labels(self) -> dict[str, int]:
+        """`fatia:status` -> quantidade."""
+        query = select(ItemLabel.sample_slice, ItemLabel.label_status, func.count()).group_by(
+            ItemLabel.sample_slice, ItemLabel.label_status
+        )
+        return {f"{s}:{st}": n for s, st, n in self.session.execute(query)}
