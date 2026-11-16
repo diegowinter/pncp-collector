@@ -1,0 +1,8 @@
+- [Pendência: descartar ou marcar contratos derivados](pendencia-descarte-contratos-derivados.md) — decisão em aberto, depende de quem solicitou o projeto; hoje é flag.
+- [Escala da varredura de atas](escala-varredura-atas-pncp.md) — um dia de atas não fecha em 9,5 min; varredura nacional precisa de estratégia.
+- [Coleta incremental: pular o que já foi salvo](coleta-incremental-pncp.md) — contratos podem pular dias, atas não; desenho em aberto.
+- [Fase 3: triagem por objeto com Jev](fase3-triagem-objeto-jev.md) — decisões de 2026-11-13: compra como unidade, 6 grupos PLASEG, estados, endpoint decisions, amostra de validação.
+- [Convenção: controle em inglês, PNCP em português](convencao-nomes-controle-ingles.md) — colunas/variáveis nossas em inglês, campos PNCP em snake_case original, valores de classificação em português.
+- [Experimento System One abertos](experimento-system-one-oss.md) — Laya/Von zero-shot não servem para a triagem; noul x choice no Jev equivalentes; caminho é destilar + fine-tune.
+- [Railway sem espaço em 2026-11-14](railway-disco-cheio.md) — banco 4,4 GB travou a coleta de contratos; precisa ~10 GB; cópia local em pncp_railway.
+- [Fase 4: rotulagem de itens para treino](fase4-rotulagem-itens-treino.md) — capa só prioriza; Jev rotula ~88 mil descrições distintas; classificador local decide por item.
