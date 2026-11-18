@@ -150,10 +150,12 @@ CONTROL_COLUMNS = frozenset(
         "compra_key",
         "compra_resolved_by",
         "is_target_type",
+        "is_valid",
         "is_winner",
         "documento_tipo",
         "documento_id",
         # fase 5 (classificador local de itens)
+        "results_fetched_at",
         "predicted_category",
         "predicted_confidence",
         "predicted_interest",
@@ -191,6 +193,10 @@ def normalize_resultado(
     record["numero_item"] = numero_item
     if record.get("sequencial_resultado") is None:
         record["sequencial_resultado"] = posicao + 1
+    # Resultado em vigor chega com dataCancelamento "0001-01-01": e campo vazio.
+    cancelamento = record.get("data_cancelamento")
+    if cancelamento is not None and cancelamento.year == 1:
+        record["data_cancelamento"] = None
     return record
 
 

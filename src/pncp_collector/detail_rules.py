@@ -15,6 +15,8 @@ from .config import Settings
 from .models import DetailStatus, ItemsStatus, ResultsStatus
 
 HOMOLOGADO = "Homologado"
+#: Unica situacao de resultado que vale como preco. A outra vista e "Cancelado".
+RESULTADO_INFORMADO = "Informado"
 
 ATA = "ata"
 CONTRATO = "contrato"
@@ -79,8 +81,21 @@ def _valid_price(value: Any) -> bool:
         return False
 
 
+def is_valid_result(resultado: dict[str, Any]) -> bool:
+    """Resultado que vale como preco: situacao "Informado" e valor unitario > 0.
+
+    Fica de fora o cancelado (que costuma manter o preco antigo) e o cadastro de
+    reserva que so registra o fornecedor, com valor zero. A situacao e o criterio:
+    `data_cancelamento` nao serve, porque resultado em vigor chega com 0001-01-01
+    e cancelado chega sem data. Situacao desconhecida tambem nao vale.
+    """
+    return resultado.get("situacao_compra_item_resultado_nome") == RESULTADO_INFORMADO and _valid_price(
+        resultado.get("valor_unitario_homologado")
+    )
+
+
 def pick_winner(resultados: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Entre os resultados com valor_unitario_homologado > 0, o de menor
+    """Entre os resultados validos (is_valid_result), o de menor
     ordem_classificacao_srp (None conta como infinito); empate -> menor
     sequencial_resultado (fallback: posicao na lista)."""
     candidates = [
@@ -91,7 +106,7 @@ def pick_winner(resultados: list[dict[str, Any]]) -> dict[str, Any] | None:
             r,
         )
         for position, r in enumerate(resultados)
-        if _valid_price(r.get("valor_unitario_homologado"))
+        if is_valid_result(r)
     ]
     if not candidates:
         return None
@@ -99,9 +114,11 @@ def pick_winner(resultados: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def mark_winner(resultados: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Grava is_winner em cada resultado (True so no vencedor). Muta e devolve a lista."""
+    """Grava is_valid (todos os que valem como preco) e is_winner (so o primeiro
+    deles) em cada resultado. Muta e devolve a lista."""
     winner = pick_winner(resultados)
     for r in resultados:
+        r["is_valid"] = is_valid_result(r)
         r["is_winner"] = r is winner
     return resultados
 

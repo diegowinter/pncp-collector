@@ -62,8 +62,8 @@ git clone <repositório>                     # branch main
 # copiar o .env do PC antigo para a raiz (PNCP_DATABASE_URL, PNCP_OPENROUTER_API_KEY,
 # PNCP_DETAIL_CONCURRENCY=4, PNCP_TRIAGE_CONCURRENCY=16, PNCP_TRIAGE_MAX_COST_USD=12)
 uv sync
-createdb pncp_railway
-pg_restore -d pncp_railway -j 4 D:\pncp-backup\pncp_railway_2026-11-16.dump
+createdb -p 5433 pncp                       # PC novo: PostgreSQL 16 na porta 5433
+pg_restore -p 5433 -d pncp -j 8 D:\pncp-backup\pncp_railway_2026-11-16.dump
 # copiar D:\pncp-backup\models para <repositório>\models  (senão prever-itens retreina com
 # outro model_id e refaz os 615 mil já previstos; retreinar leva ~8 min e também serve)
 uv run pytest                               # 171 testes, sem rede nem Postgres
@@ -81,12 +81,12 @@ Use `PYTHONUTF8=1` se o console reclamar de codificação (o spinner do rich usa
 
 ## O que falta construir (próximo trabalho, nesta ordem)
 
-1. **Passo C filtrado pelo classificador.** Hoje `detalhar` só pega compras com documento
-   pendente do passo A, e ainda não consulta `itens.predicted_*`. Precisa de: selecionar
-   compras com algum item `predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD` (0,5) e
-   buscar resultado só desses itens; o passo A (arquivos) e o D (fechar documentos) só para
-   essas compras. Nos 2,47 M itens de ata medidos, eram ~58 mil itens de interesse em ~10 mil
-   compras: o C cai de milhões para dezenas de milhares de chamadas.
+1. **Passo C filtrado pelo classificador.** FEITO em 2026-11-17: `detalhar` busca resultado só
+   dos itens com `predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD` (0,5), homologados e com
+   resultado, sem depender do passo A; o passo A e o D ficam só nas capas dessas compras
+   (`--todos-os-itens` desliga). Resultado válido = situação `Informado` e preço > 0
+   (`is_valid`, 1:n por item; cancelado não vence). Falta rodar: ~96 mil itens em ~31 mil
+   compras (`uv run pncp-collector detalhar --only-step C`).
 2. **Precisão do classificador.** Erros conhecidos: "colete" não operacional vira
    vestuario_operacional; peça/locação de veículo vira viatura; descrição vazia
    ("conforme anexo", "LOTE Nº 46") é impossível. Caminhos: limiar por classe, ou
@@ -108,7 +108,8 @@ Use `PYTHONUTF8=1` se o console reclamar de codificação (o spinner do rich usa
 - Exército (CNPJ 00394452000103) entra como `potencial` na capa por "Regimento/Batalhão"
   mesmo comprando areia; isso não importa mais, porque o item decide.
 - O Railway (banco remoto original) ficou sem disco em 2026-11-14; desde então tudo roda no
-  Postgres local `pncp_railway`. A caixa (TV box de 1 GB) não serve para treino, só coleta.
+  Postgres local, hoje o banco `pncp` no PostgreSQL 16 (porta 5433; antes se chamava
+  `pncp_railway`). A caixa (TV box de 1 GB) não serve para treino, só coleta.
 
 ## Arquivos de referência no repositório
 

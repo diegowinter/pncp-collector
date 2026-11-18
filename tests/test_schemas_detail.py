@@ -154,3 +154,22 @@ def test_normalize_texto_livre_fica_inteiro_e_corta_so_coluna_limitada():
     assert row["objeto_contrato"] == longo
     assert row["tipo_pessoa"] == "PJ"
     assert row["raw"]["tipoPessoa"] == "PJX"
+
+
+def test_normalize_resultado_guarda_o_payload_inteiro_em_raw():
+    # `reservaRemanescente` nao tem coluna: so sobrevive porque o raw e o payload inteiro.
+    row = normalize_resultado(RESULTADO, COMPRA, 1, 0)
+    assert row["raw"] is RESULTADO
+    assert row["raw"]["reservaRemanescente"] == {"codigo": 1, "nome": "Não se aplica"}
+
+
+def test_normalize_resultado_data_de_cancelamento_0001_e_vazia():
+    em_vigor = {**RESULTADO, "situacaoCompraItemResultadoNome": "Informado", "dataCancelamento": "0001-01-01T00:00:00"}
+    row = normalize_resultado(em_vigor, COMPRA, 1, 0)
+    assert row["data_cancelamento"] is None
+    assert row["raw"]["dataCancelamento"] == "0001-01-01T00:00:00"  # o original segue no raw
+
+    cancelado = {**RESULTADO, "situacaoCompraItemResultadoNome": "Cancelado", "dataCancelamento": "2026-05-28"}
+    row = normalize_resultado(cancelado, COMPRA, 1, 0)
+    assert row["data_cancelamento"] == date(2026, 5, 28)
+    assert row["situacao_compra_item_resultado_nome"] == "Cancelado"

@@ -11,6 +11,7 @@ from pncp_collector.config import Settings
 from pncp_collector.detail import Detailer
 from pncp_collector.db import CompraRow, DocumentRow
 from pncp_collector.models import DetailStatus, ItemsStatus, ResultsStatus
+from pncp_collector.schemas import normalize_item
 
 CNPJ = "07954480000179"
 
@@ -38,13 +39,15 @@ def item(n, situacao="Homologado", tem_resultado=True):
     }
 
 
-def resultado(n, seq=1, ordem=1, valor=9.5):
+def resultado(n, seq=1, ordem=1, valor=9.5, situacao="Informado"):
     return {
         "numeroItem": n,
         "sequencialResultado": seq,
         "ordemClassificacaoSrp": ordem,
         "valorUnitarioHomologado": valor,
         "niFornecedor": "1",
+        "situacaoCompraItemResultadoId": 2 if situacao == "Cancelado" else 1,
+        "situacaoCompraItemResultadoNome": situacao,
     }
 
 
@@ -163,12 +166,25 @@ class MemoryRepository:
             detailed_at=d["detailed_at"],
         )
 
+    def _interest(self, r, min_interest):
+        return (
+            r.get("predicted_interest") is not None
+            and r["predicted_interest"] >= min_interest
+            and r.get("situacao_compra_item_nome") == "Homologado"
+            and bool(r.get("tem_resultado"))
+        )
+
     def select_documents(
-        self, tipo, statuses, *, max_attempts, limit=None, cnpj=None, triage_statuses=None
+        self, tipo, statuses, *, max_attempts, limit=None, cnpj=None, triage_statuses=None, min_interest=None
     ):
         rows = []
         for id, d in self.docs[tipo].items():
             if d["detail_status"] not in statuses:
+                continue
+            if min_interest is not None and not any(
+                k == d["numero_controle_pncp_compra"] and self._interest(r, min_interest)
+                for (k, _), r in self.itens.items()
+            ):
                 continue
             if triage_statuses:
                 compra = self.compras.get(d["numero_controle_pncp_compra"])
@@ -251,7 +267,21 @@ class MemoryRepository:
         ]
         return rows[:limit] if limit else rows
 
-    def select_compras_for_results(self, *, max_attempts, limit=None):
+    def select_compras_for_results(self, *, max_attempts, limit=None, min_interest=None, refresh=False):
+        if min_interest is not None:
+            wanted = {
+                k
+                for (k, _), r in self.itens.items()
+                if self._interest(r, min_interest) and (refresh or r.get("results_fetched_at") is None)
+            }
+            rows = [
+                self._compra_row(c)
+                for key, c in sorted(self.compras.items())
+                if key in wanted
+                and c["items_status"] == ItemsStatus.OK
+                and not (c["results_status"] == ResultsStatus.ERRO and max_attempts is not None and c["results_attempts"] >= max_attempts)
+            ]
+            return rows[:limit] if limit else rows
         rows = [
             self._compra_row(c)
             for key, c in self.compras.items()
@@ -273,16 +303,20 @@ class MemoryRepository:
             self.itens[(r["compra_key"], r["numero_item"])] = r
         return len(rows)
 
-    def select_items_for_results(self, compra_key, *, refresh=False):
-        done = {n for (k, n, _) in self.resultados if k == compra_key}
+    def select_items_for_results(self, compra_key, *, refresh=False, min_interest=None):
         return sorted(
             n
             for (k, n), r in self.itens.items()
             if k == compra_key
             and r.get("situacao_compra_item_nome") == "Homologado"
             and r.get("tem_resultado")
-            and (refresh or n not in done)
+            and (min_interest is None or self._interest(r, min_interest))
+            and (refresh or r.get("results_fetched_at") is None)
         )
+
+    def mark_results_fetched(self, compra_key, numeros, when):
+        for n in numeros:
+            self.itens[(compra_key, n)]["results_fetched_at"] = when
 
     def upsert_resultados(self, rows):
         for r in rows:
@@ -343,6 +377,7 @@ def test_compra_compartilhada_consulta_itens_uma_vez(world):
     assert repo.compras[key]["results_status"] == ResultsStatus.OK
     assert repo.compras[key]["url_pncp"] == f"https://pncp.gov.br/app/editais/{CNPJ}/2025/1"
     assert repo.resultados[(key, 1, 1)]["is_winner"] is True
+    assert repo.resultados[(key, 1, 1)]["is_valid"] is True
     assert stats.items_stored == 3 and stats.results_stored == 1 and stats.files_stored == 3
     assert stats.documents_closed == 3
     assert repo.runs[0]["stats"]["documents_after"] == {"ata:ok": 2, "contrato:ok": 1}
@@ -607,3 +642,140 @@ def test_detalhar_sem_triagem_mantem_comportamento_antigo(world):
     detailer.run(steps="A")
 
     assert client.count("arquivos_ata") == 2
+
+
+def test_passo_c_grava_todos_os_resultados_e_marca_validos(world):
+    """Cancelado e reserva sem preco ficam gravados (com raw), mas so os validos contam."""
+    detailer, repo, client = world
+    key = compra_key(1)
+    repo.add_ata(ata_id(1, 1), key)
+    client.arquivos[ata_id(1, 1)] = [ARQ_OUTROS]
+    client.itens[key] = [item(1)]
+    client.resultados[(key, 1)] = [
+        resultado(1, seq=1, ordem=1, valor=1824.27, situacao="Cancelado"),
+        resultado(1, seq=2, ordem=1, valor=2050),
+        resultado(1, seq=3, ordem=2, valor=2100),
+        resultado(1, seq=4, ordem=3, valor=0),
+    ]
+
+    stats = detailer.run()
+
+    assert stats.results_stored == 4
+    rows = [repo.resultados[(key, 1, seq)] for seq in (1, 2, 3, 4)]
+    assert [x["is_valid"] for x in rows] == [False, True, True, False]
+    assert [x["is_winner"] for x in rows] == [False, True, False, False]
+    assert all(x["raw"]["sequencialResultado"] == x["sequencial_resultado"] for x in rows)
+    assert rows[0]["situacao_compra_item_resultado_nome"] == "Cancelado"
+
+
+# --- filtro do classificador (min_interest) ----------------------------------------------
+
+
+def seed_compra(repo, key, itens):
+    """Compra como o scripts/baixar_itens.py deixa: itens baixados e previstos, e
+    nenhum documento passou pelo passo A. `itens`: (numero, interesse previsto, kwargs)."""
+    repo.ensure_compras([{"compra_key": key}])
+    repo.compras[key]["items_status"] = ItemsStatus.OK
+    for numero, interest, kwargs in itens:
+        row = normalize_item(item(numero, **kwargs), key)
+        row["predicted_interest"] = interest
+        repo.itens[(key, numero)] = row
+
+
+def test_filtro_busca_so_itens_de_interesse_sem_depender_de_documento(world):
+    detailer, repo, client = world
+    k1, k2 = compra_key(1), compra_key(2)
+    seed_compra(
+        repo,
+        k1,
+        [
+            (1, 0.9, {}),
+            (2, 0.1, {}),  # fora do corte
+            (3, 0.9, {"situacao": "Fracassado", "tem_resultado": False}),  # sem resultado a buscar
+            (4, None, {}),  # sem previsao
+        ],
+    )
+    seed_compra(repo, k2, [(1, 0.2, {})])
+    client.resultados[(k1, 1)] = [resultado(1)]
+
+    stats = detailer.run(steps="C", min_interest=0.5)
+
+    assert [c for c in client.calls if c[0] == "resultados"] == [("resultados", k1, 1)]
+    assert client.count("arquivos_ata") == 0 and client.count("itens") == 0
+    assert stats.results_stored == 1
+    assert repo.itens[(k1, 1)]["results_fetched_at"] is not None
+    assert repo.itens[(k1, 2)].get("results_fetched_at") is None
+    assert repo.compras[k1]["results_status"] == ResultsStatus.OK
+    assert repo.compras[k2]["results_status"] == ResultsStatus.PENDENTE  # nem foi tocada
+
+
+def test_filtro_nao_repete_item_consultado_e_pega_previsao_nova(world):
+    detailer, repo, client = world
+    key = compra_key(1)
+    seed_compra(repo, key, [(1, 0.9, {}), (2, 0.1, {})])
+    # item 1 responde sem nenhum resultado (204): consultado mesmo assim.
+
+    detailer.run(steps="C", min_interest=0.5)
+    detailer.run(steps="C", min_interest=0.5)
+    assert client.count("resultados") == 1
+    assert repo.compras[key]["results_status"] == ResultsStatus.OK
+
+    # Modelo novo passa a marcar o item 2: a compra, ja `ok`, volta so por ele.
+    repo.itens[(key, 2)]["predicted_interest"] = 0.8
+    client.resultados[(key, 2)] = [resultado(2)]
+    detailer.run(steps="C", min_interest=0.5)
+    assert [c for c in client.calls if c[0] == "resultados"] == [
+        ("resultados", key, 1),
+        ("resultados", key, 2),
+    ]
+
+    detailer.run(steps="C", min_interest=0.5, refresh=True)  # refresh refaz os dois
+    assert client.count("resultados") == 4
+
+
+def test_filtro_falha_parcial_refaz_so_o_item_que_falhou(world):
+    detailer, repo, client = world
+    key = compra_key(1)
+    seed_compra(repo, key, [(1, 0.9, {}), (2, 0.9, {})])
+    client.resultados[(key, 1)] = DetailFetchError("x", 500, "boom")
+    client.resultados[(key, 2)] = [resultado(2)]
+
+    detailer.run(steps="C", min_interest=0.5)
+    assert repo.compras[key]["results_status"] == ResultsStatus.PARCIAL
+    assert repo.itens[(key, 1)].get("results_fetched_at") is None
+    assert repo.itens[(key, 2)]["results_fetched_at"] is not None
+
+    client.resultados[(key, 1)] = [resultado(1)]
+    detailer.run(steps="C", min_interest=0.5)
+    assert [c[2] for c in client.calls if c[0] == "resultados"] == [1, 2, 1]
+    assert repo.compras[key]["results_status"] == ResultsStatus.OK
+
+
+def test_filtro_restringe_o_passo_a_e_fecha_os_documentos(world):
+    detailer, repo, client = world
+    k1, k2 = compra_key(1), compra_key(2)
+    seed_compra(repo, k1, [(1, 0.9, {})])
+    seed_compra(repo, k2, [(1, 0.1, {})])
+    repo.add_ata(ata_id(1), k1)
+    repo.add_ata(ata_id(2), k2)
+    client.arquivos[ata_id(1)] = [ARQ_OUTROS]
+    client.arquivos[ata_id(2)] = [ARQ_OUTROS]
+    client.resultados[(k1, 1)] = [resultado(1)]
+
+    detailer.run(min_interest=0.5)
+
+    assert [c for c in client.calls if c[0] == "arquivos_ata"] == [("arquivos_ata", ata_id(1))]
+    assert client.count("itens") == 0  # ja estavam baixados
+    assert repo.status("ata", ata_id(1)) == DetailStatus.OK
+    assert repo.status("ata", ata_id(2)) == DetailStatus.PENDENTE
+    assert repo.docs["ata"][ata_id(2)]["detailed_at"] is None
+
+
+def test_sem_filtro_o_passo_c_continua_exigindo_documento_pendente(world):
+    detailer, repo, client = world
+    key = compra_key(1)
+    seed_compra(repo, key, [(1, 0.9, {})])
+
+    detailer.run(steps="C")  # sem min_interest e sem documento que passou pelo passo A
+
+    assert client.count("resultados") == 0

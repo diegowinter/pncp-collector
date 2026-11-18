@@ -27,6 +27,7 @@ uv run pncp-collector treinar-itens        # fase 5: treina o classificador loca
 uv run pncp-collector prever-itens         # fase 5: grava categoria prevista, confiança e interesse em cada item
 uv run pncp-collector detalhar --triagem potencial   # fase 2 só nas compras que a triagem apontou
 uv run pncp-collector detalhar      # fase 2: arquivos, itens e resultados das capas no banco
+uv run pncp-collector detalhar --only-step C   # resultado homologado só dos itens de interesse (filtro do classificador)
 uv run pncp-collector status        # quanto falta, por status
 uv run pncp-collector all           # atas → contratos → detalhar (a ordem importa)
 uv run pncp-collector all --reference 2026-09-08 --skip-detail -v
@@ -46,6 +47,22 @@ Opções de `detalhar`:
 | `--revisit-sem-arquivo` | Revisita documentos `sem_arquivo`. |
 | `--only-step A\|B\|C\|D` | Executa só os passos indicados (`BC`, `D`...). |
 | `--triagem potencial[,indefinido]` | Só capas cuja compra está nesses `triage_status` (fase 3). Sem a opção, todas, como antes. |
+| `--todos-os-itens` | Desliga o filtro do classificador (ver abaixo). Passo C volta a consultar todo item homologado de compra com documento pendente: milhões de chamadas. |
+
+**Filtro do classificador (padrão).** Baixar itens é 1 chamada por compra; buscar resultado é 1
+chamada por item. Por isso `detalhar` só busca resultado dos itens que o classificador local
+(fase 5) previu como de interesse: `predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD` (0,5),
+`Homologado` e com `temResultado`. Com o filtro:
+
+- o passo C não depende de documento nem do passo A: vale para qualquer compra com itens
+  baixados (inclusive as do `scripts/baixar_itens.py`);
+- o passo A só toca as capas dessas compras, e o D fecha esses documentos;
+- cada item guarda `results_fetched_at`; item consultado não é consultado de novo (só com
+  `--refresh`), e uma previsão nova que marque outro item traz a compra de volta sozinha;
+- `results_status = ok` na compra passa a dizer "itens de interesse buscados".
+
+Item sem previsão (`prever-itens` ainda não rodou nele) não entra. `status` mostra quantos
+itens de interesse já têm resultado buscado e quantos faltam.
 
 Opções de `triar`:
 
@@ -142,7 +159,7 @@ progresso e commit em lote — qualquer um pode ser interrompido e retomado:
 |---|---|---|
 | A | documento | Resolve a compra (`numero_controle_pncp_compra`; contrato sem ele usa `GET /orgaos/{cnpj}/contratos/{ano}/{seq}` como fallback), lista os arquivos e decide `sem_identificacao` / `sem_arquivo`. |
 | B | compra | `GET .../compras/{ano}/{seq}/itens` (paginado; o default da API é 10, então pede 500). Grava **todos** os itens com a situação que vieram. |
-| C | item `Homologado` com `temResultado` | `GET .../itens/{n}/resultados`. Grava **todos** os resultados e marca o vencedor (`is_winner`): menor `ordem_classificacao_srp` entre os de valor unitário > 0. Commit por compra: se cair no meio, a próxima execução refaz só os itens que faltaram. |
+| C | item `Homologado` com `temResultado` | `GET .../itens/{n}/resultados`. Grava **todos** os resultados, com o payload inteiro em `raw`. Marca os que valem como preço (`is_valid`: situação `Informado` e valor unitário > 0; cancelado e reserva sem preço ficam de fora) e, entre eles, o vencedor (`is_winner`): menor `ordem_classificacao_srp`, empate pelo menor `sequencial_resultado`. Commit por compra: se cair no meio, a próxima execução refaz só os itens que faltaram. |
 | D | só banco | Fecha o `detail_status` dos documentos a partir do estado da compra. |
 
 A unidade dos passos B e C é a **compra**, não o documento: as N atas e contratos de um mesmo
@@ -326,7 +343,8 @@ Fase 2:
 - `itens`: PK `(compra_key, numero_item)`; colunas espelhando a API (`situacao_compra_item`
   e `situacao_compra_item_nome`, `tem_resultado`, `valor_unitario_estimado`...) + `raw`.
 - `itens_resultados`: PK `(compra_key, numero_item, sequencial_resultado)`; todos os
-  resultados do item + `is_winner` (controle nosso) + `raw`.
+  resultados do item + `is_valid` e `is_winner` (controle nosso; 1:n válidos por item, um
+  vencedor) + `raw`. Banco já existente: `docs/MIGRACAO_RESULTADO_VALIDO.sql`.
 - `arquivos`: PK `(documento_tipo, documento_id, sequencial_documento)`; `tipo_documento_nome`,
   `titulo`, `url`, `data_publicacao_pncp` + `is_target_type` + `raw`. Arquivo removido do PNCP
   não é apagado daqui; fica com `updated_at` antigo.
@@ -360,6 +378,8 @@ Fase 5:
   `predicted_at` (controle nosso; o upsert do passo B não os toca).
 - `collection_runs` recebe `dataset = 'treino_itens'` (métricas) e `'previsao_itens'`.
 - Banco já existente: [docs/MIGRACAO_PREVISAO_ITENS.sql](docs/MIGRACAO_PREVISAO_ITENS.sql) (idempotente).
+- `itens` ganha `results_fetched_at` (passo C por item) e índice em `predicted_interest`:
+  [docs/MIGRACAO_RESULTADOS_INTERESSE.sql](docs/MIGRACAO_RESULTADOS_INTERESSE.sql) (idempotente).
 - Banco criado antes de `processo`/`numero_contrato_empenho`/`numero_ata_registro_preco`
   virarem `TEXT`: [docs/MIGRACAO_TEXTO_LIVRE.sql](docs/MIGRACAO_TEXTO_LIVRE.sql)
   (so metadado, roda em segundos). Sem ela um valor acima de 120 caracteres dá

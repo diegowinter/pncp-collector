@@ -152,7 +152,12 @@ localidadeExterior, moedaEstrangeira, valorNominalMoedaEstrangeira,
 dataCotacaoMoedaEstrangeira, timezoneCotacaoMoedaEstrangeira, reservaRemanescente{codigo,nome}
 ```
 
-`situacaoCompraItemResultadoNome` visto: `Informado` (id 1). `reservaRemanescente` é objeto
+`situacaoCompraItemResultadoNome` visto em 2.191 resultados (2026-11-17): `Informado` (id 1,
+98%) e `Cancelado` (id 2). O cancelado costuma manter o preço antigo (32 de 40) e pode ter a
+mesma `ordemClassificacaoSrp` do que o substituiu. `dataCancelamento` não serve de critério:
+resultado em vigor chega com `0001-01-01T00:00:00` e cancelado chega sem data. Segundo
+colocado de cadastro de reserva vem `Informado`, quase sempre com valor e quantidade zero.
+`reservaRemanescente` é objeto
 aninhado (vira `reserva_remanescente_codigo`/`_nome` no achatamento).
 
 ## 1.5 Fallback do contrato

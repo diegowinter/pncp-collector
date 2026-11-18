@@ -141,6 +141,16 @@ def detalhar(
             "potencial,indefinido). Padrao: todas, como antes da fase 3.",
         ),
     ] = None,
+    todos_os_itens: Annotated[
+        bool,
+        typer.Option(
+            "--todos-os-itens",
+            help="Desliga o filtro do classificador: passo C para todo item homologado de "
+            "compra com documento pendente (milhoes de chamadas). Padrao: so itens com "
+            "predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD, e passo A so nas capas "
+            "dessas compras.",
+        ),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Fase 2: arquivos, itens e resultados das capas ja persistidas."""
@@ -163,6 +173,7 @@ def detalhar(
         revisit_sem_arquivo=revisit_sem_arquivo,
         steps=steps,
         triage_statuses=triage_statuses,
+        min_interest=None if todos_os_itens else settings.item_interest_threshold,
     )
     render_detail_summary(console, stats)
 
@@ -359,6 +370,7 @@ def status() -> None:
         documents = repo.count_documents_by_status()
         compras = repo.count_compras_by_status()
         triage = repo.count_compras_by_triage()
+        interest = repo.count_interest_results(settings.item_interest_threshold)
 
     table = Table(title="Documentos por detail_status")
     table.add_column("Status")
@@ -378,6 +390,16 @@ def status() -> None:
     table.add_column("results_status", justify="right")
     for key in sorted(set(compras["items"]) | set(compras["results"])):
         table.add_row(key, str(compras["items"].get(key, 0)), str(compras["results"].get(key, 0)))
+    console.print(table)
+
+    table = Table(
+        title=f"Passo C filtrado (interesse >= {settings.item_interest_threshold:g}, homologado com resultado)"
+    )
+    table.add_column("Itens de interesse")
+    table.add_column("Quantidade", justify="right")
+    table.add_row("resultado ja buscado", str(interest["items_fetched"]))
+    table.add_row("a buscar", str(interest["items_pending"]))
+    table.add_row("    em compras", str(interest["compras_pending"]))
     console.print(table)
 
     table = Table(title="Compras por triage_status (fase 3)")

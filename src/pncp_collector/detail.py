@@ -8,6 +8,10 @@ loop, progresso e commit em lote, para que qualquer um possa ser retomado:
     C  resultados                              (por item homologado com resultado)
     D  fechar o status dos documentos          (so banco)
 
+Com `min_interest` (filtro do classificador, fase 5) o passo C deixa de depender
+de documento: consulta so os itens previstos como de interesse, em qualquer compra
+com itens baixados, e o passo A fica restrito as capas dessas mesmas compras.
+
 As decisoes estao em detail_rules; aqui so se executa e se persiste.
 """
 
@@ -146,15 +150,23 @@ class Detailer:
         revisit_sem_arquivo: bool = False,
         steps: str = STEPS,
         triage_statuses: Sequence[str] | None = None,
+        min_interest: float | None = None,
     ) -> DetailStats:
         """`triage_statuses` restringe o passo A as capas cuja compra esta nesses
         estados da fase 3 (ex.: so `potencial`). Os passos B e C ja so tocam
-        compras com documento pendente, entao o recorte se propaga sozinho."""
+        compras com documento pendente, entao o recorte se propaga sozinho.
+
+        `min_interest` liga o filtro do classificador: o passo C busca resultado so
+        dos itens com `predicted_interest >= min_interest` (de qualquer compra com
+        itens baixados, com ou sem documento pendente) e o passo A so toca capas
+        dessas compras. `results_status = ok` passa a dizer "itens de interesse
+        buscados", nao "todos os itens"."""
         tipos = [ATA, CONTRATO] if tipo == "all" else [tipo]
         statuses = tuple(statuses or revisit_statuses(refresh, revisit_sem_arquivo))
         steps = steps.upper()
         stats = DetailStats()
         self._triage_statuses = tuple(triage_statuses) if triage_statuses else None
+        self._min_interest = min_interest
 
         with self.repository_factory() as repo:
             run_id = repo.start_run(DATASET)
@@ -314,6 +326,7 @@ class Detailer:
                 limit=limit,
                 cnpj=self.config.cnpj,
                 triage_statuses=getattr(self, "_triage_statuses", None),
+                min_interest=getattr(self, "_min_interest", None),
             )
             with make_progress(self.console) as progress:
                 task = progress.add_task(f"A arquivos ({tipo})", total=len(docs), detail="")
@@ -413,7 +426,9 @@ class Detailer:
         self, client: Any, repo: DetailRepository, compra: CompraRow, refresh: bool, stats: DetailStats
     ) -> None:
         ref = parse_compra_key(compra.compra_key)
-        numeros = repo.select_items_for_results(compra.compra_key, refresh=refresh)
+        numeros = repo.select_items_for_results(
+            compra.compra_key, refresh=refresh, min_interest=getattr(self, "_min_interest", None)
+        )
         outcomes: list[ItemOutcome] = self._map(
             lambda n: self._fetch_resultados(client, ref, n), numeros
         )
@@ -423,6 +438,10 @@ class Detailer:
 
         rows = [r for o in outcomes if not o.error for r in o.resultados]
         stats.results_stored += repo.upsert_resultados(rows)
+        # Por item: consultado nao volta a ser consultado, mesmo sem nenhum resultado.
+        repo.mark_results_fetched(
+            compra.compra_key, [o.numero_item for o in outcomes if not o.error], _now()
+        )
 
         if not failed:
             status, error = ResultsStatus.OK, None
@@ -445,7 +464,10 @@ class Detailer:
         self, client: Any, repo: DetailRepository, refresh: bool, limit: int | None, stats: DetailStats
     ) -> None:
         compras = repo.select_compras_for_results(
-            max_attempts=self.config.detail_max_attempts, limit=limit
+            max_attempts=self.config.detail_max_attempts,
+            limit=limit,
+            min_interest=getattr(self, "_min_interest", None),
+            refresh=refresh,
         )
         with make_progress(self.console) as progress:
             task = progress.add_task("C resultados (compras)", total=len(compras), detail="")

@@ -312,6 +312,7 @@ class DetailRepository:
         limit: int | None = None,
         cnpj: str | None = None,
         triage_statuses: Sequence[str] | None = None,
+        min_interest: float | None = None,
     ) -> list[DocumentRow]:
         """Capas a passar pelo passo A, mais recentes primeiro.
 
@@ -322,9 +323,18 @@ class DetailRepository:
         Com `triage_statuses`, so capas cuja compra (pelo numeroControlePNCPCompra
         da capa) esta nesses estados da fase 3. Capa sem compra na capa (contrato
         que depende do fallback) fica de fora do recorte.
+
+        Com `min_interest`, so capas cuja compra tem item de interesse (o mesmo
+        recorte do passo C; ver `_interest_item`).
         """
         model = DOCUMENT_MODELS[tipo]
         query = select(model).where(model.detail_status.in_(list(statuses)))
+        if min_interest is not None:
+            query = query.where(
+                model.numero_controle_pncp_compra.in_(
+                    select(Item.compra_key).where(*self._interest_item(min_interest))
+                )
+            )
         if triage_statuses:
             triaged = (
                 select(Compra.compra_key)
@@ -431,15 +441,39 @@ class DetailRepository:
         return [_compra_row(obj) for obj in self.session.scalars(query)]
 
     def select_compras_for_results(
-        self, *, max_attempts: int | None, limit: int | None = None
+        self,
+        *,
+        max_attempts: int | None,
+        limit: int | None = None,
+        min_interest: float | None = None,
+        refresh: bool = False,
     ) -> list[CompraRow]:
-        query = select(Compra).where(
-            Compra.items_status == ItemsStatus.OK,
-            Compra.results_status.in_(
-                [ResultsStatus.PENDENTE, ResultsStatus.PARCIAL, ResultsStatus.ERRO]
-            ),
-            self._has_pending_document(),
-        )
+        """Compras a passar pelo passo C.
+
+        Sem `min_interest`: resultado pendente e documento pendente (com arquivo alvo).
+
+        Com `min_interest` (filtro do classificador): compras com item de interesse
+        ainda sem resultado buscado. Nao depende de documento nem de
+        `results_status`, so do item: compra ja fechada volta sozinha se uma nova
+        previsao marcar outro item dela.
+        """
+        if min_interest is None:
+            query = select(Compra).where(
+                Compra.items_status == ItemsStatus.OK,
+                Compra.results_status.in_(
+                    [ResultsStatus.PENDENTE, ResultsStatus.PARCIAL, ResultsStatus.ERRO]
+                ),
+                self._has_pending_document(),
+            )
+        else:
+            wanted = select(Item.compra_key).where(*self._interest_item(min_interest))
+            if not refresh:
+                wanted = wanted.where(Item.results_fetched_at.is_(None))
+            query = (
+                select(Compra)
+                .where(Compra.items_status == ItemsStatus.OK, Compra.compra_key.in_(wanted))
+                .order_by(Compra.compra_key)
+            )
         if max_attempts is not None:
             query = query.where(
                 ~(
@@ -450,6 +484,28 @@ class DetailRepository:
         if limit:
             query = query.limit(limit)
         return [_compra_row(obj) for obj in self.session.scalars(query)]
+
+    @staticmethod
+    def _interest_item(min_interest: float) -> tuple[Any, ...]:
+        """Item que o passo C filtrado consulta: previsto como de interesse e com
+        resultado para buscar (homologado com temResultado)."""
+        return (
+            Item.predicted_interest >= min_interest,
+            Item.situacao_compra_item_nome == "Homologado",
+            Item.tem_resultado.is_(True),
+        )
+
+    def count_interest_results(self, min_interest: float) -> dict[str, int]:
+        """Andamento do passo C filtrado: itens de interesse buscados e a buscar."""
+        fetched = Item.results_fetched_at.is_not(None)
+        row = self.session.execute(
+            select(
+                func.count().filter(fetched),
+                func.count().filter(~fetched),
+                func.count(func.distinct(Item.compra_key)).filter(~fetched),
+            ).where(*self._interest_item(min_interest))
+        ).one()
+        return {"items_fetched": row[0], "items_pending": row[1], "compras_pending": row[2]}
 
     @staticmethod
     def _has_pending_document():
@@ -603,19 +659,33 @@ class DetailRepository:
     def upsert_itens(self, rows: Sequence[dict[str, Any]]) -> int:
         return upsert(self.session, Item, rows)
 
-    def select_items_for_results(self, compra_key: str, *, refresh: bool = False) -> list[int]:
-        """Itens homologados com resultado a buscar; sem refresh, pula os ja gravados."""
+    def select_items_for_results(
+        self, compra_key: str, *, refresh: bool = False, min_interest: float | None = None
+    ) -> list[int]:
+        """Itens homologados com resultado a buscar; sem refresh, pula os ja buscados.
+        Com `min_interest`, so os previstos como de interesse."""
         query = select(Item.numero_item).where(
             Item.compra_key == compra_key,
             Item.situacao_compra_item_nome == "Homologado",
             Item.tem_resultado.is_(True),
         )
+        if min_interest is not None:
+            query = query.where(Item.predicted_interest >= min_interest)
         if not refresh:
-            done = select(ItemResultado.numero_item).where(
-                ItemResultado.compra_key == compra_key
-            )
-            query = query.where(Item.numero_item.not_in(done))
+            query = query.where(Item.results_fetched_at.is_(None))
         return sorted(self.session.scalars(query))
+
+    def mark_results_fetched(
+        self, compra_key: str, numeros: Sequence[int], when: datetime
+    ) -> None:
+        """Registra que o resultado desses itens foi buscado (mesmo voltando vazio)."""
+        if not numeros:
+            return
+        self.session.execute(
+            update(Item)
+            .where(Item.compra_key == compra_key, Item.numero_item.in_(list(numeros)))
+            .values(results_fetched_at=when)
+        )
 
     def upsert_resultados(self, rows: Sequence[dict[str, Any]]) -> int:
         return upsert(self.session, ItemResultado, rows)

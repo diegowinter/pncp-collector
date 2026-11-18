@@ -10,6 +10,7 @@ from pncp_collector.detail_rules import (
     has_target_file,
     homologated_items,
     is_target_file_type,
+    is_valid_result,
     items_needing_results,
     mark_winner,
     pick_winner,
@@ -82,8 +83,13 @@ def test_homologados_e_quem_precisa_de_resultado():
 # --- 6.3 vencedor ----------------------------------------------------------------
 
 
-def r(seq, ordem, valor):
-    return {"sequencial_resultado": seq, "ordem_classificacao_srp": ordem, "valor_unitario_homologado": valor}
+def r(seq, ordem, valor, situacao="Informado"):
+    return {
+        "sequencial_resultado": seq,
+        "ordem_classificacao_srp": ordem,
+        "valor_unitario_homologado": valor,
+        "situacao_compra_item_resultado_nome": situacao,
+    }
 
 
 def test_vencedor_um_resultado():
@@ -115,6 +121,33 @@ def test_mark_winner_marca_so_um():
     assert [x["is_winner"] for x in res] == [False, True, False]
     assert all("is_winner" in x for x in mark_winner([r(1, 1, 0)]))
     assert mark_winner([r(1, 1, 0)])[0]["is_winner"] is False
+
+
+def test_resultado_valido_exige_informado_e_preco():
+    assert is_valid_result(r(1, 1, "10.5"))
+    assert not is_valid_result(r(1, 1, 0))
+    assert not is_valid_result(r(1, 1, 10, "Cancelado"))
+    assert not is_valid_result(r(1, 1, 10, None))  # situacao ausente nao vale
+    assert not is_valid_result(r(1, 1, 10, "Suspenso"))  # situacao nova nao vira preco
+
+
+def test_cancelado_nao_vence_mesmo_registrado_primeiro():
+    # Caso real (07911696000157-1-000041/2024 item 1): mesma ordem, o cancelado veio antes.
+    res = [r(1, 1, "1824.27", "Cancelado"), r(2, 1, "2050")]
+    assert pick_winner(res)["sequencial_resultado"] == 2
+
+
+def test_so_cancelados_nao_tem_vencedor():
+    res = mark_winner([r(1, 1, 10, "Cancelado"), r(2, 1, 12, "Cancelado")])
+    assert pick_winner(res) is None
+    assert [(x["is_valid"], x["is_winner"]) for x in res] == [(False, False), (False, False)]
+
+
+def test_mark_winner_marca_todos_os_validos():
+    # Cadastro de reserva: 1o e 2o com preco proprio, 3o so com o nome, 4o cancelado.
+    res = mark_winner([r(1, 1, 140), r(2, 2, "161.68"), r(3, 3, 0), r(4, 4, 150, "Cancelado")])
+    assert [x["is_valid"] for x in res] == [True, True, False, False]
+    assert [x["is_winner"] for x in res] == [True, False, False, False]
 
 
 # --- 6.4 maquina de estados --------------------------------------------------------

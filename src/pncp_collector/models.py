@@ -337,9 +337,14 @@ class Item(Base, StampMixin):
     # Fase 5: previsao do classificador local (item_classifier). Controle nosso.
     predicted_category: Mapped[str | None] = mapped_column(String(40), index=True)
     predicted_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
-    predicted_interest: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    predicted_interest: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), index=True)
     predicted_model: Mapped[str | None] = mapped_column(String(80))
     predicted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Passo C: quando o resultado deste item foi buscado (None = ainda nao). Por item,
+    # e nao so por compra, porque com o filtro do classificador so parte dos itens da
+    # compra e consultada, e item consultado pode voltar sem nenhum resultado.
+    results_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     raw: Mapped[dict] = mapped_column(JSONB)
 
@@ -390,8 +395,10 @@ class ItemLabel(Base, StampMixin):
 class ItemResultado(Base, StampMixin):
     """Resultado (proposta homologada) de um item.
 
-    GET .../itens/{numeroItem}/resultados. Todos os resultados sao gravados;
-    `is_winner` marca o escolhido pela regra de preco (detail_rules.pick_winner).
+    GET .../itens/{numeroItem}/resultados. Todos os resultados sao gravados, com
+    o payload inteiro em `raw` (reprocessar a regra nao exige recoletar).
+    `is_valid` marca os que valem como preco (detail_rules.is_valid_result), 1:n
+    por item; `is_winner` marca o primeiro deles (detail_rules.pick_winner).
     """
 
     __tablename__ = "itens_resultados"
@@ -426,7 +433,10 @@ class ItemResultado(Base, StampMixin):
     aplicacao_beneficio_me_epp: Mapped[bool | None] = mapped_column(Boolean)
     aplicacao_criterio_desempate: Mapped[bool | None] = mapped_column(Boolean)
 
-    # Controle nosso: o vencedor segundo a regra de preco.
+    # Controle nosso: os que valem como preco e, entre eles, o vencedor.
+    is_valid: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", index=True
+    )
     is_winner: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     raw: Mapped[dict] = mapped_column(JSONB)
 

@@ -30,6 +30,33 @@ LEFT JOIN itens_resultados r
 WHERE i.situacao_compra_item_nome = 'Homologado';
 ```
 
+## Todos os preços válidos de um item
+
+Um item pode ter mais de um resultado que vale como preço (`is_valid`): cadastro de reserva
+com preço próprio, por exemplo. `is_winner` é o primeiro deles; cancelado e reserva sem preço
+ficam gravados, mas com `is_valid = false`. Qual mostrar é decisão de tela.
+
+```sql
+SELECT i.compra_key, i.numero_item, i.descricao, i.predicted_category,
+       r.ordem_classificacao_srp, r.is_winner,
+       r.valor_unitario_homologado, r.quantidade_homologada,
+       r.ni_fornecedor, r.nome_razao_social_fornecedor, r.data_resultado
+FROM itens i
+JOIN itens_resultados r
+  ON r.compra_key = i.compra_key AND r.numero_item = i.numero_item AND r.is_valid
+ORDER BY i.compra_key, i.numero_item, r.ordem_classificacao_srp NULLS LAST, r.sequencial_resultado;
+```
+
+Item homologado que foi consultado e ficou sem nenhum preço válido (só cancelados ou só
+reserva zerada):
+
+```sql
+SELECT r.compra_key, r.numero_item, COUNT(*) AS resultados
+FROM itens_resultados r
+GROUP BY r.compra_key, r.numero_item
+HAVING COUNT(*) FILTER (WHERE r.is_valid) = 0;
+```
+
 ## Itens de um documento
 
 Ata ou contrato → compra → itens homologados. Todos os documentos da mesma compra compartilham
@@ -79,7 +106,8 @@ cadastro de reserva em SRP, ou item com mais de um fornecedor.
 
 ```sql
 SELECT r.compra_key, r.numero_item, COUNT(*) AS resultados,
-       COUNT(*) FILTER (WHERE r.is_winner) AS vencedores,
+       COUNT(*) FILTER (WHERE r.is_valid) AS validos,
+       COUNT(*) FILTER (WHERE r.situacao_compra_item_resultado_nome = 'Cancelado') AS cancelados,
        MIN(r.valor_unitario_homologado) AS menor_valor,
        MAX(r.valor_unitario_homologado) AS maior_valor
 FROM itens_resultados r
