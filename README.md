@@ -295,6 +295,50 @@ compra em palavras como contexto (desambigua "colete" da Guarda Municipal do col
 de saúde), e regressão logística. `PNCP_ITEM_CLASS_WEIGHT=balanced` (padrão) favorece recall
 nas classes raras, que é o que o filtro do passo C precisa; `none` favorece precisão.
 
+### Rótulo, confiança e interesse: por que o corte é 0,5 se todo item tem rótulo
+
+Para cada item o modelo calcula a chance de cada uma das 15 categorias (somam 100%) e grava
+três números. Eles respondem a perguntas diferentes:
+
+| Coluna | O que é | Para que serve |
+|---|---|---|
+| `predicted_category` | a categoria campeã, a de maior chance sozinha | dizer **qual** é o item |
+| `predicted_confidence` | a chance dessa campeã | medir a certeza do rótulo; **não** entra no filtro |
+| `predicted_interest` | 1 − chance de `outros`, isto é, a **soma** das 14 categorias de interesse | decidir **se** vale buscar o resultado (passo C) |
+
+O filtro do passo C usa só o interesse: `predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD`.
+Três casos mostram a diferença:
+
+| Caso | `outros` | Categorias de interesse | Rótulo | Confiança | Interesse | Entra no passo C? |
+|---|---|---|---|---|---|---|
+| Claro | 5% | viatura 95% | `viatura` | 0,95 | 0,95 | sim |
+| Campeã fraca | 25% | A 40%, B 35% | `A` | 0,40 | 0,75 | **sim**: o corte olha os 75%, não os 40% |
+| Repartido | 32% | 68% espalhados, nenhuma acima de 32% | `outros` | 0,32 | 0,68 | **sim**, mesmo rotulado `outros` |
+
+Duas consequências:
+
+- **Todo item com rótulo diferente de `outros` passa no corte de 0,5.** Para uma categoria de
+  interesse vencer, `outros` tem de ter menos que ela, logo menos de 50%. Não existe item
+  "não-outros" abaixo de 0,5.
+- **O contrário não vale.** Quando o interesse se reparte entre várias categorias, nenhuma
+  vence `outros` sozinha, mas a soma vence. O modelo acha que é coisa de segurança e só não
+  sabe de que tipo. Exemplos reais: "CANELEIRA ANTITUMULTO" (`outros` 32%, interesse 68%) e
+  "CONTROLADORA DE ACESSO - RECONHECIMENTO FACIAL" (39% e 61%).
+
+Na prática o corte de 0,5 quer dizer "todos os não-outros, mais os repartidos". Medido em
+2026-11-18 nos itens homologados com resultado (os que o passo C consulta):
+
+| Grupo | Itens |
+|---|---|
+| Rótulo de interesse (dos quais 1.527 com campeã abaixo de 50%) | 94.094 |
+| Rótulo `outros` com interesse >= 0,5 (os repartidos) | 1.953 |
+| **Passo C** | **96.047** |
+| Abaixo de 0,5 (todos `outros`; 96% deles abaixo de 0,1) | 6.793.961 |
+
+Os repartidos trazem ruído junto ("guarda-chuva" e "cloreto férrico" a 50-54%), mas são poucos,
+e errar para mais custa uma chamada; errar para menos perde o preço. O limiar também é um
+botão que o rótulo não dá: 0,4 acrescenta 11.966 itens ao passo C e 0,3 acrescenta 29.975.
+
 O binário **não vai no repositório** (`models/` está no `.gitignore`): é derivado de
 `item_labels` + código + versão do scikit-learn, e qualquer máquina com o banco o refaz em
 poucos minutos. Para levar o processo a outro PC: dump do banco, clone, `.env`, `uv sync`,
