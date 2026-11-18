@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date
 from typing import Annotated
 
@@ -20,6 +22,7 @@ from .db import (
     drop_schema,
 )
 from .detail import STEPS, Detailer, render_detail_summary
+from .detail_rules import parse_interest_threshold
 from .item_classifier import ItemClassifier, render_predict_summary, render_train_summary
 from .item_labeling import SLICES, ItemLabeler, render_label_summary
 from .models import LabelStatus, TriageStatus
@@ -147,8 +150,8 @@ def detalhar(
             "--todos-os-itens",
             help="Desliga o filtro do classificador: passo C para todo item homologado de "
             "compra com documento pendente (milhoes de chamadas). Padrao: so itens com "
-            "predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD, e passo A so nas capas "
-            "dessas compras.",
+            "predicted_interest >= limiar guardado no banco (comando `limiar`), e passo A "
+            "so nas capas dessas compras.",
         ),
     ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
@@ -173,9 +176,70 @@ def detalhar(
         revisit_sem_arquivo=revisit_sem_arquivo,
         steps=steps,
         triage_statuses=triage_statuses,
-        min_interest=None if todos_os_itens else settings.item_interest_threshold,
+        min_interest=None if todos_os_itens else _interest_threshold(),
     )
     render_detail_summary(console, stats)
+
+
+@contextmanager
+def _repository() -> Iterator[DetailRepository]:
+    """Sessao com o esquema garantido (cria tabela nova, como `settings`)."""
+    engine = build_engine(settings)
+    create_schema(engine)
+    with build_session_factory(engine)() as session:
+        yield DetailRepository(session)
+
+
+def _interest_threshold() -> float:
+    """Limiar de interesse em vigor: o do banco; o do `.env` so semeia a primeira vez."""
+    with _repository() as repo:
+        return repo.interest_threshold(settings.item_interest_threshold)
+
+
+def _render_interest(title: str, counts: dict[str, int]) -> None:
+    table = Table(title=title)
+    table.add_column("Itens de interesse")
+    table.add_column("Quantidade", justify="right")
+    table.add_row("resultado ja buscado", str(counts["items_fetched"]))
+    table.add_row("a buscar", str(counts["items_pending"]))
+    table.add_row("    em compras", str(counts["compras_pending"]))
+    console.print(table)
+
+
+@app.command()
+def limiar(
+    valor: Annotated[
+        str | None,
+        typer.Argument(help="Novo limiar, entre 0 e 1 (ex.: 0.4). Sem valor, so mostra o atual."),
+    ] = None,
+) -> None:
+    """Mostra ou muda o limiar de interesse do passo C, guardado no banco.
+
+    O item entra no passo C quando `predicted_interest` (soma das chances das
+    categorias de interesse) e maior ou igual ao limiar. Baixar o limiar so
+    acrescenta itens a buscar; subir nao apaga resultado ja gravado.
+    """
+    with _repository() as repo:
+        current = repo.interest_threshold(settings.item_interest_threshold)
+        if valor is None:
+            row = repo.interest_threshold_row()
+            console.print(
+                f"Limiar de interesse: [bold]{current:g}[/bold] "
+                f"(no banco desde {row.updated_at:%Y-%m-%d %H:%M})"
+            )
+            _render_interest(f"Passo C com limiar {current:g}", repo.count_interest_results(current))
+            return
+        try:
+            new = parse_interest_threshold(valor)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=2) from None
+        before = repo.count_interest_results(current)
+        repo.set_interest_threshold(new)
+        after = repo.count_interest_results(new)
+        console.print(f"Limiar de interesse: {current:g} -> [bold]{new:g}[/bold]")
+        _render_interest(f"Antes (limiar {current:g})", before)
+        _render_interest(f"Depois (limiar {new:g})", after)
 
 
 TRIAGE_STATUSES = {
@@ -365,12 +429,12 @@ def prever_itens(
 @app.command()
 def status() -> None:
     """Quanto falta: documentos por detail_status e compras por items/results_status."""
-    with build_session_factory(build_engine(settings))() as session:
-        repo = DetailRepository(session)
+    with _repository() as repo:
         documents = repo.count_documents_by_status()
         compras = repo.count_compras_by_status()
         triage = repo.count_compras_by_triage()
-        interest = repo.count_interest_results(settings.item_interest_threshold)
+        threshold = repo.interest_threshold(settings.item_interest_threshold)
+        interest = repo.count_interest_results(threshold)
 
     table = Table(title="Documentos por detail_status")
     table.add_column("Status")
@@ -392,15 +456,9 @@ def status() -> None:
         table.add_row(key, str(compras["items"].get(key, 0)), str(compras["results"].get(key, 0)))
     console.print(table)
 
-    table = Table(
-        title=f"Passo C filtrado (interesse >= {settings.item_interest_threshold:g}, homologado com resultado)"
+    _render_interest(
+        f"Passo C filtrado (interesse >= {threshold:g}, homologado com resultado)", interest
     )
-    table.add_column("Itens de interesse")
-    table.add_column("Quantidade", justify="right")
-    table.add_row("resultado ja buscado", str(interest["items_fetched"]))
-    table.add_row("a buscar", str(interest["items_pending"]))
-    table.add_row("    em compras", str(interest["compras_pending"]))
-    console.print(table)
 
     table = Table(title="Compras por triage_status (fase 3)")
     table.add_column("Status")

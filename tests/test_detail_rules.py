@@ -13,6 +13,7 @@ from pncp_collector.detail_rules import (
     is_valid_result,
     items_needing_results,
     mark_winner,
+    parse_interest_threshold,
     pick_winner,
     revisit_statuses,
     target_file_types,
@@ -237,3 +238,19 @@ def test_politica_de_revisita():
     assert DetailStatus.SEM_IDENTIFICACAO not in revisit_statuses(refresh=True, revisit_sem_arquivo=True)
     assert DetailStatus.SEM_ARQUIVO in revisit_statuses(revisit_sem_arquivo=True)
     assert DetailStatus.OK in revisit_statuses(refresh=True)
+
+
+# --- limiar de interesse ------------------------------------------------------------
+
+
+def test_limiar_aceita_ponto_virgula_e_as_bordas():
+    assert parse_interest_threshold("0.4") == 0.4
+    assert parse_interest_threshold(" 0,35 ") == 0.35
+    assert parse_interest_threshold(0) == 0.0
+    assert parse_interest_threshold(1) == 1.0
+
+
+@pytest.mark.parametrize("valor", ["", "abc", None, "1.01", "-0.1", "nan", "50"])
+def test_limiar_fora_de_0_a_1_e_recusado(valor):
+    with pytest.raises(ValueError):
+        parse_interest_threshold(valor)

@@ -167,6 +167,7 @@ class Detailer:
         stats = DetailStats()
         self._triage_statuses = tuple(triage_statuses) if triage_statuses else None
         self._min_interest = min_interest
+        stats.min_interest = min_interest
 
         with self.repository_factory() as repo:
             run_id = repo.start_run(DATASET)
@@ -507,6 +508,10 @@ def render_detail_summary(console: Console, stats: DetailStats) -> None:
     table = Table(title="Resumo - detalhamento")
     table.add_column("Metrica")
     table.add_column("Valor", justify="right")
+    table.add_row(
+        "Limiar de interesse",
+        "desligado (todos os itens)" if stats.min_interest is None else f"{stats.min_interest:g}",
+    )
     table.add_row("Documentos processados (passo A)", str(stats.documents_processed))
     table.add_row("Compras consultadas (passo B)", str(stats.compras_fetched))
     table.add_row("Arquivos gravados", str(stats.files_stored))

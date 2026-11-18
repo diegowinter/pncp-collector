@@ -28,6 +28,8 @@ uv run pncp-collector prever-itens         # fase 5: grava categoria prevista, c
 uv run pncp-collector detalhar --triagem potencial   # fase 2 só nas compras que a triagem apontou
 uv run pncp-collector detalhar      # fase 2: arquivos, itens e resultados das capas no banco
 uv run pncp-collector detalhar --only-step C   # resultado homologado só dos itens de interesse (filtro do classificador)
+uv run pncp-collector limiar        # mostra o limiar de interesse do passo C (guardado no banco)
+uv run pncp-collector limiar 0.4    # muda o limiar e mostra quantos itens passam a entrar
 uv run pncp-collector status        # quanto falta, por status
 uv run pncp-collector all           # atas → contratos → detalhar (a ordem importa)
 uv run pncp-collector all --reference 2026-09-08 --skip-detail -v
@@ -51,8 +53,8 @@ Opções de `detalhar`:
 
 **Filtro do classificador (padrão).** Baixar itens é 1 chamada por compra; buscar resultado é 1
 chamada por item. Por isso `detalhar` só busca resultado dos itens que o classificador local
-(fase 5) previu como de interesse: `predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD` (0,5),
-`Homologado` e com `temResultado`. Com o filtro:
+(fase 5) previu como de interesse: `predicted_interest >=` limiar (0,5; guardado no banco, ver
+"O limiar mora no banco" na fase 5), `Homologado` e com `temResultado`. Com o filtro:
 
 - o passo C não depende de documento nem do passo A: vale para qualquer compra com itens
   baixados (inclusive as do `scripts/baixar_itens.py`);
@@ -295,6 +297,10 @@ compra em palavras como contexto (desambigua "colete" da Guarda Municipal do col
 de saúde), e regressão logística. `PNCP_ITEM_CLASS_WEIGHT=balanced` (padrão) favorece recall
 nas classes raras, que é o que o filtro do passo C precisa; `none` favorece precisão.
 
+As técnicas usadas aqui (destilação, limiar de decisão, cascata, aprendizado ativo) são
+conhecidas; o mapa com as referências está em
+[docs/METODO_CLASSIFICACAO.md](docs/METODO_CLASSIFICACAO.md).
+
 ### Rótulo, confiança e interesse: por que o corte é 0,5 se todo item tem rótulo
 
 Para cada item o modelo calcula a chance de cada uma das 15 categorias (somam 100%) e grava
@@ -306,7 +312,7 @@ três números. Eles respondem a perguntas diferentes:
 | `predicted_confidence` | a chance dessa campeã | medir a certeza do rótulo; **não** entra no filtro |
 | `predicted_interest` | 1 − chance de `outros`, isto é, a **soma** das 14 categorias de interesse | decidir **se** vale buscar o resultado (passo C) |
 
-O filtro do passo C usa só o interesse: `predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD`.
+O filtro do passo C usa só o interesse: `predicted_interest >=` limiar (hoje 0,5).
 Três casos mostram a diferença:
 
 | Caso | `outros` | Categorias de interesse | Rótulo | Confiança | Interesse | Entra no passo C? |
@@ -338,6 +344,44 @@ Na prática o corte de 0,5 quer dizer "todos os não-outros, mais os repartidos"
 Os repartidos trazem ruído junto ("guarda-chuva" e "cloreto férrico" a 50-54%), mas são poucos,
 e errar para mais custa uma chamada; errar para menos perde o preço. O limiar também é um
 botão que o rótulo não dá: 0,4 acrescenta 11.966 itens ao passo C e 0,3 acrescenta 29.975.
+
+**O que o limiar divide.** Com limiar L o item entra quando `outros` tem no máximo 1 − L. Em
+0,5 isso é "`outros` não passa da metade sozinho", e o limiar separa exatamente os itens
+rotulados `outros` em repartidos (entram) e `outros` de verdade (ficam de fora). Abaixo de 0,5
+todo rótulo de interesse continua entrando e só cresce o grupo dos repartidos (em 0,4, entra
+item com `outros` até 60%). Acima de 0,5 o limiar passa a cortar também itens com rótulo de
+interesse (em 0,7, um item `viatura` 40% / `equip_ti` 25% / `outros` 35% fica de fora).
+
+### O limiar mora no banco
+
+O limiar em vigor fica na tabela `settings` (chave `item_interest_threshold`), não no `.env`:
+vale para toda máquina que usa o mesmo banco, muda sem deploy e pode ser editado por um painel.
+`detalhar` e `status` leem dali a cada execução.
+
+- `uv run pncp-collector limiar` mostra o valor e desde quando; `limiar 0.4` grava e mostra
+  quantos itens entram no passo C antes e depois.
+- `PNCP_ITEM_INTEREST_THRESHOLD` só semeia o banco na primeira leitura; depois disso é ignorada.
+- Cada execução de `detalhar` grava o limiar que usou em `collection_runs.stats.min_interest`.
+- Mudar o limiar não exige nenhum passo extra. O controle do passo C é por item
+  (`results_fetched_at`): baixar o limiar só acrescenta itens a buscar na próxima execução;
+  subir não apaga resultado já gravado, só deixa de buscar os que ficaram abaixo.
+
+### Possibilidades futuras: tira-teima dos casos de dúvida
+
+Decisão de 2026-11-18: seguir só com a regra do limiar. O Jev (modelo fechado, pago) fica
+restrito a **gerar rótulos de treino**; o dia a dia do pipeline roda só no classificador local,
+para não depender de modelo fechado na operação. Ficam registradas, sem compromisso:
+
+- **Tira-teima pelo Jev.** Mandar para a fatia `ativo` de `item_labels` (aprendizado ativo, já
+  existe) as descrições em que o classificador fica em dúvida: rótulo `outros` com interesse
+  >= limiar (1.953 itens homologados com resultado), rótulo de interesse com campeã abaixo de
+  50% (1.527) e, como segunda chance, a faixa logo abaixo do limiar (29.975 entre 0,3 e 0,5).
+  Custo estimado: menos de US$ 5. Compatível com a decisão acima se o rótulo for usado só para
+  **retreinar** o classificador, que aí encolhe a zona de dúvida sozinho.
+- **Categoria final por item.** Hoje o item repartido entra no passo C com rótulo `outros` e
+  nada decide depois de que tipo ele é. Faltaria uma regra (rótulo conferido vence a previsão)
+  e um lugar para gravá-la.
+- **Conferência humana** só do que continuar em dúvida depois do retreino.
 
 O binário **não vai no repositório** (`models/` está no `.gitignore`): é derivado de
 `item_labels` + código + versão do scikit-learn, e qualquer máquina com o banco o refaz em
@@ -422,6 +466,9 @@ Fase 5:
   `predicted_at` (controle nosso; o upsert do passo B não os toca).
 - `collection_runs` recebe `dataset = 'treino_itens'` (métricas) e `'previsao_itens'`.
 - Banco já existente: [docs/MIGRACAO_PREVISAO_ITENS.sql](docs/MIGRACAO_PREVISAO_ITENS.sql) (idempotente).
+- `settings`: PK `key`; `value` (texto), `description`, `updated_at`. Parâmetros de operação
+  que mudam sem `.env`; hoje só `item_interest_threshold`. Banco já existente:
+  [docs/MIGRACAO_SETTINGS.sql](docs/MIGRACAO_SETTINGS.sql), ou qualquer comando (`create_all`).
 - `itens` ganha `results_fetched_at` (passo C por item) e índice em `predicted_interest`:
   [docs/MIGRACAO_RESULTADOS_INTERESSE.sql](docs/MIGRACAO_RESULTADOS_INTERESSE.sql) (idempotente).
 - Banco criado antes de `processo`/`numero_contrato_empenho`/`numero_ata_registro_preco`
@@ -457,7 +504,8 @@ Fase 4: usa as mesmas variáveis da fase 3 (`OPENROUTER_API_KEY`, `TRIAGE_MODEL`
 `TRIAGE_CONCURRENCY`, `TRIAGE_MAX_ATTEMPTS`, `TRIAGE_MAX_COST_USD`).
 
 Fase 5: `MODELS_DIR` (padrão `models`), `ITEM_VALIDATION_CSV`, `ITEM_CLASS_WEIGHT` (`balanced` ou
-`none`) e `ITEM_INTEREST_THRESHOLD` (0,5; probabilidade mínima de interesse para o item contar).
+`none`) e `ITEM_INTEREST_THRESHOLD` (0,5; só semeia a tabela `settings` na primeira vez. O limiar
+em vigor fica no banco: comando `limiar`).
 
 ## Testes
 

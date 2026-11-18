@@ -12,7 +12,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, settings as default_settings
-from .ids import parse_compra_key, url_publica_compra
+from .ids import parse_compra_key, url_publica_compra
+from .detail_rules import parse_interest_threshold
 from .models import (
     Arquivo,
     Ata,
@@ -23,12 +24,14 @@ from .models import (
     Compra,
     Contrato,
     DetailStatus,
+    ITEM_INTEREST_THRESHOLD_KEY,
     Item,
     ItemLabel,
     ItemResultado,
     ItemsStatus,
     LabelStatus,
     ResultsStatus,
+    Setting,
     TriageStatus,
 )
 
@@ -300,6 +303,42 @@ class DetailRepository:
             run.finished_at = datetime.now(timezone.utc)
             run.stats = stats
             self.session.commit()
+
+    # --- parametros no banco (settings) ----------------------------------------
+
+    def interest_threshold(self, default: float) -> float:
+        """Limiar de interesse em vigor. O banco manda; na primeira vez grava
+        `default` (o do `.env`), que dali em diante so serve de semente."""
+        row = self.session.get(Setting, ITEM_INTEREST_THRESHOLD_KEY)
+        if row is not None:
+            return parse_interest_threshold(row.value)
+        self._write_interest_threshold(default)
+        return default
+
+    def interest_threshold_row(self) -> Setting | None:
+        return self.session.get(Setting, ITEM_INTEREST_THRESHOLD_KEY)
+
+    def set_interest_threshold(self, value: float) -> float:
+        value = parse_interest_threshold(value)
+        self._write_interest_threshold(value)
+        return value
+
+    def _write_interest_threshold(self, value: float) -> None:
+        statement = insert(Setting).values(
+            key=ITEM_INTEREST_THRESHOLD_KEY,
+            value=f"{value:g}",
+            description=(
+                "Limiar de predicted_interest (soma das chances das categorias de interesse) "
+                "a partir do qual o item entra no passo C. Entre 0 e 1."
+            ),
+        )
+        self.session.execute(
+            statement.on_conflict_do_update(
+                index_elements=["key"],
+                set_={"value": statement.excluded.value, "updated_at": func.now()},
+            )
+        )
+        self.session.commit()
 
     # --- documentos ----------------------------------------------------------
 

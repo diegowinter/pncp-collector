@@ -469,6 +469,25 @@ class Arquivo(Base, StampMixin):
 Index("ix_itens_situacao_compra", Item.situacao_compra_item_nome, Item.compra_key)
 
 
+#: Chave, em `settings`, do limiar de interesse do passo C.
+ITEM_INTEREST_THRESHOLD_KEY = "item_interest_threshold"
+
+
+class Setting(Base):
+    """Parametro de operacao guardado no banco: muda sem mexer em codigo nem em
+    `.env`, vale para toda maquina que usa o mesmo banco e pode ser editado por um
+    painel. Tabela nossa: tudo em ingles. `value` e texto; quem le converte."""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class CollectionRun(Base):
     """Registro de cada execucao. Tabela nossa: tudo em ingles."""
 

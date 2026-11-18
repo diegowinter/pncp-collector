@@ -82,7 +82,8 @@ Use `PYTHONUTF8=1` se o console reclamar de codificação (o spinner do rich usa
 ## O que falta construir (próximo trabalho, nesta ordem)
 
 1. **Passo C filtrado pelo classificador.** FEITO em 2026-11-17: `detalhar` busca resultado só
-   dos itens com `predicted_interest >= PNCP_ITEM_INTEREST_THRESHOLD` (0,5), homologados e com
+   dos itens com `predicted_interest >=` limiar (0,5, guardado na tabela `settings`; comando
+   `limiar`), homologados e com
    resultado, sem depender do passo A; o passo A e o D ficam só nas capas dessas compras
    (`--todos-os-itens` desliga). Resultado válido = situação `Informado` e preço > 0
    (`is_valid`, 1:n por item; cancelado não vence). Falta rodar: ~96 mil itens em ~31 mil
@@ -95,6 +96,9 @@ Use `PYTHONUTF8=1` se o console reclamar de codificação (o spinner do rich usa
 4. **Objetos indefinidos**: fila para OCR dos PDFs (passo A traz os links). A fazer.
 5. `collection_runs.dataset='itens_treino'` é o nome antigo de `scripts/baixar_itens.py`,
    mantido de propósito para não quebrar o histórico.
+6. **Tira-teima dos itens em dúvida**: só possibilidade futura (README, fase 5). Decisão de
+   2026-11-18: o Jev serve só para gerar rótulo de treino; a operação roda no classificador
+   local com a regra do limiar, para não depender de modelo fechado no dia a dia.
 
 ## Armadilhas já vistas
 

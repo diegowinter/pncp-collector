@@ -700,6 +700,7 @@ def test_filtro_busca_so_itens_de_interesse_sem_depender_de_documento(world):
 
     stats = detailer.run(steps="C", min_interest=0.5)
 
+    assert stats.min_interest == 0.5 and repo.runs[-1]["stats"]["min_interest"] == 0.5
     assert [c for c in client.calls if c[0] == "resultados"] == [("resultados", k1, 1)]
     assert client.count("arquivos_ata") == 0 and client.count("itens") == 0
     assert stats.results_stored == 1

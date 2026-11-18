@@ -101,6 +101,8 @@ class Settings(BaseSettings):
     # precisao. Medido em 2026-11-14: balanced P=0,83 R=0,98; none P=0,91 R=0,96.
     item_class_weight: str = "balanced"
     # Probabilidade minima de "e de interesse" (1 - P(outros)) para o item contar.
+    # So semeia o banco na primeira vez: o valor em vigor fica na tabela `settings`
+    # (comando `limiar`), para valer em toda maquina e poder mudar por painel.
     item_interest_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
 
     # Recortes opcionais da consulta.

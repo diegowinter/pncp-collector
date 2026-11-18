@@ -177,6 +177,21 @@ def revisit_statuses(refresh: bool = False, revisit_sem_arquivo: bool = False) -
     return tuple(statuses)
 
 
+# --- limiar de interesse (filtro do passo C) -------------------------------------
+
+
+def parse_interest_threshold(value: Any) -> float:
+    """Limiar de `predicted_interest` (soma das chances das categorias de interesse)
+    a partir do qual o item entra no passo C. Entre 0 e 1; ValueError fora disso."""
+    try:
+        threshold = float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        raise ValueError(f"limiar de interesse invalido: {value!r}") from None
+    if not 0.0 <= threshold <= 1.0:  # tambem recusa NaN
+        raise ValueError(f"limiar de interesse fora de 0..1: {value!r}")
+    return threshold
+
+
 # --- contadores da execucao (7.6) ------------------------------------------------
 
 
@@ -195,9 +210,12 @@ class DetailStats:
     calls: Counter = field(default_factory=Counter)
     errors: Counter = field(default_factory=Counter)
     step_seconds: dict[str, float] = field(default_factory=dict)
+    #: Limiar de interesse usado nesta execucao (None = filtro desligado).
+    min_interest: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "min_interest": self.min_interest,
             "documents_before": dict(self.documents_before),
             "documents_after": dict(self.documents_after),
             "documents_processed": self.documents_processed,
